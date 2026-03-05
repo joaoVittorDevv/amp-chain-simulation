@@ -1,0 +1,36 @@
+[package]
+name = "distortion"
+version = "0.1.0"
+edition = "2021"
+authors = ["jao <joaovittorh1@gmail.com>"]
+license = "GPL-3.0-or-later"
+homepage = "https://youtu.be/dQw4w9WgXcQ"
+description = "A short description of your plugin"
+
+[workspace]
+members = ["xtask"]
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+name = "standalone"
+path = "src/bin/standalone.rs"
+
+[dependencies]
+cpal = "0.15.2"
+eframe = "0.31.0"
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
+num-complex = "0.4.6"
+realfft = "3.5.0"
+rtrb = "0.3.3"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"

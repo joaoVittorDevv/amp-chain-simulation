@@ -1,0 +1,66 @@
+# --- Rust / Cargo ---
+/target/
+target/
+# Backup files from `rustfmt`
+**/*.rs.bk
+# Error log files
+cargo-debug/
+# Local Cargo config (authentication, custom paths)
+.cargo/config
+.cargo/config.toml
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+# Pip installs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# --- IDEs / Editors ---
+# VS Code
+.vscode/
+# JetBrains (IntelliJ, RustRover)
+.idea/
+*.iws
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+# Vim
+.*.swp
+.*.swo
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+Desktop.ini
+# Temporary files (e.g. from file managers)
+.directory
+*~
+
+# --- Project Specific Defaults ---
+# Local/temporary testing files from the current project
+/debug/
+/logs/
+/renders/
+/exports/
+/docs/
+# Any files containing secrets
+.env*
+! .env.example
+*.log
+
+# --- Local Scripts / Scratchpad ---
+# Scripts at the root that should not be tracked (Personal use)
+# find_macro.rs
+# list_devices.rs
+# patch_file.rs
+# test_api.rs
+# easy_calls.py
+# easy_request.py
+# start_standalone.sh
