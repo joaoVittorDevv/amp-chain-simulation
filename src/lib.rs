@@ -41,13 +41,16 @@ struct BaseIOParams {
 
     #[id = "gain"]
     pub gain: FloatParam,
+
+    #[id = "bypass"]
+    pub bypass: BoolParam,
 }
 
-// O estado interno para a GUI interagir
 struct EditorState {
     params: Arc<BaseIOParams>,
     analyzer: dsp::AnalyzerDsp,
     consumer: Arc<Mutex<Option<Consumer<f32>>>>,
+    panel_open: bool,
 }
 
 impl Default for BaseIO {
@@ -82,6 +85,8 @@ impl Default for BaseIOParams {
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
             .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+            bypass: BoolParam::new("Bypass", false),
         }
     }
 }
@@ -121,6 +126,7 @@ impl Plugin for BaseIO {
                 params: self.params.clone(),
                 analyzer: dsp::AnalyzerDsp::default(),
                 consumer: consumer_mutex,
+                panel_open: true,
             },
             |_, _| {},
             move |egui_ctx, setter, state| {
@@ -135,7 +141,7 @@ impl Plugin for BaseIO {
                 }
 
                 // 4. Pintar a UI de Alta Performance
-                egui::CentralPanel::default().show(egui_ctx, |ui| {
+                egui::TopBottomPanel::top("header_panel").show(egui_ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(format!("{} Spectrum Analyzer", APP_NAME));
                         ui.separator();
@@ -161,9 +167,46 @@ impl Plugin for BaseIO {
                             setter.set_parameter(&state.params.input_select, new_in);
                             setter.end_set_parameter(&state.params.input_select);
                         }
+
+                        ui.separator();
+
+                        // Bypass Checkbox
+                        let current_bypass = state.params.bypass.value();
+                        let mut new_bypass = current_bypass;
+                        if ui.checkbox(&mut new_bypass, "Bypass").changed() {
+                            setter.begin_set_parameter(&state.params.bypass);
+                            setter.set_parameter(&state.params.bypass, new_bypass);
+                            setter.end_set_parameter(&state.params.bypass);
+                        }
                     });
-                    ui.separator();
-                    
+                });
+
+                if state.panel_open {
+                    egui::TopBottomPanel::bottom("plugin_panel")
+                        .resizable(true)
+                        .min_height(100.0)
+                        .show(egui_ctx, |ui| {
+                            ui.heading("Distortion Settings");
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Drive:");
+                                let mut dummy_drive = 0.5;
+                                ui.add(egui::Slider::new(&mut dummy_drive, 0.0..=1.0));
+
+                                ui.label("Tone:");
+                                let mut dummy_tone = 0.5;
+                                ui.add(egui::Slider::new(&mut dummy_tone, 0.0..=1.0));
+                            });
+                        });
+                }
+
+                egui::TopBottomPanel::bottom("signal_chain_panel")
+                    .resizable(false)
+                    .show(egui_ctx, |ui| {
+                        ui::draw_signal_chain(ui, &mut state.panel_open);
+                    });
+
+                egui::CentralPanel::default().show(egui_ctx, |ui| {
                     ui::draw_spectrum(ui, &state.analyzer.spectrum, dsp::FFT_SIZE);
                 });
             }
@@ -188,6 +231,7 @@ impl Plugin for BaseIO {
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let input_mode = self.params.input_select.value();
+        let bypass = self.params.bypass.value();
         
         for mut channel_samples in buffer.iter_samples() {
             let gain = self.params.gain.smoothed.next();
@@ -202,8 +246,13 @@ impl Plugin for BaseIO {
                 InputSelect::Input2 => (r_in, r_in),
             };
             
-            l_out *= gain;
-            r_out *= gain;
+            if !bypass {
+                l_out *= gain;
+                r_out *= gain;
+            } else {
+                l_out = l_in; // bypass simply forwards original
+                r_out = r_in;
+            }
             
             if l_out.is_nan() || l_out.is_infinite() { l_out = 0.0; }
             if r_out.is_nan() || r_out.is_infinite() { r_out = 0.0; }

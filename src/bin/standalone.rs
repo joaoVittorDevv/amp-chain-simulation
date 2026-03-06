@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
-use distortion::core::ui::draw_spectrum;
+use distortion::core::ui::{draw_spectrum, draw_signal_chain};
 
 #[derive(Clone)]
 struct DeviceContext {
@@ -30,7 +30,6 @@ enum AudioCommand {
 enum AudioEvent {
     DevicesRefreshed { inputs: Vec<DeviceContext>, outputs: Vec<DeviceContext> },
     StreamStarted(Result<(), String>),
-    SampleRateWarning(Option<String>),
 }
 
 struct StandaloneApp {
@@ -64,6 +63,8 @@ struct StandaloneApp {
     
     show_settings: bool,
     is_loading: bool,
+    panel_open: bool,
+    bypass: bool,
 
     tx_cmd: Sender<AudioCommand>,
     rx_event: Receiver<AudioEvent>,
@@ -379,6 +380,8 @@ impl StandaloneApp {
 
             show_settings: false,
             is_loading: true,
+            panel_open: true,
+            bypass: false,
             tx_cmd,
             rx_event,
         };
@@ -411,7 +414,6 @@ impl StandaloneApp {
                         self.show_error_popup = false;
                     }
                 }
-                AudioEvent::SampleRateWarning(_) => {}
             }
         }
     }
@@ -477,6 +479,15 @@ impl eframe::App for StandaloneApp {
             ui.horizontal(|ui| {
                 ui.heading("🎙️ BaseIO | Analisador Standalone");
                 
+                ui.add_space(20.0);
+                
+                // Botão de Bypass
+                let mut bypass_toggled = self.bypass;
+                if ui.checkbox(&mut bypass_toggled, "Bypass").changed() {
+                    self.bypass = bypass_toggled;
+                    // Lógica DSP do bypass será inserida depois!
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button(if self.show_settings { "❌ Fechar" } else { "⚙ Configurações de Áudio" }).clicked() {
                         self.show_settings = !self.show_settings;
@@ -756,6 +767,31 @@ impl eframe::App for StandaloneApp {
                 });
             self.show_error_popup = open;
         }
+
+        if self.panel_open {
+            egui::TopBottomPanel::bottom("plugin_panel")
+                .resizable(true)
+                .min_height(100.0)
+                .show(ctx, |ui| {
+                    ui.heading("Distortion Settings");
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label("Drive:");
+                        let mut dummy_drive = 0.5;
+                        ui.add(egui::Slider::new(&mut dummy_drive, 0.0..=1.0));
+
+                        ui.label("Tone:");
+                        let mut dummy_tone = 0.5;
+                        ui.add(egui::Slider::new(&mut dummy_tone, 0.0..=1.0));
+                    });
+                });
+        }
+
+        egui::TopBottomPanel::bottom("signal_chain_panel")
+            .resizable(false)
+            .show(ctx, |ui| {
+                draw_signal_chain(ui, &mut self.panel_open);
+            });
 
         egui::CentralPanel::default().show(ctx, |ui| {
             draw_spectrum(ui, &self.analyzer.spectrum, FFT_SIZE);
