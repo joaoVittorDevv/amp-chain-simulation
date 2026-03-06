@@ -51,7 +51,7 @@ impl TightHpf {
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
-        if let Ok(c) = Coefficients::<f32>::from_params(Type::HighPass, sr.hz(), 150.0_f32.hz(), 1.2) {
+        if let Ok(c) = Coefficients::<f32>::from_params(Type::HighPass, sr.hz(), 150.0_f32.hz(), Q_BUTTERWORTH_F32) {
             self.filter.update_coefficients(c);
         }
     }
@@ -78,7 +78,7 @@ impl FizzKillerLpf {
     }
 
     pub fn set_sample_rate(&mut self, sr: f32) {
-        if let Ok(c) = Coefficients::<f32>::from_params(Type::LowPass, sr.hz(), 8000.0_f32.hz(), Q_BUTTERWORTH_F32) {
+        if let Ok(c) = Coefficients::<f32>::from_params(Type::LowPass, sr.hz(), 12000.0_f32.hz(), Q_BUTTERWORTH_F32) {
             self.filter.update_coefficients(c);
         }
     }
@@ -159,18 +159,24 @@ impl ThreeBandEq {
 pub struct PreampProcessor {
     tight_hpf:     TightHpf,
     fizz_lpf:      FizzKillerLpf,
+    pre_mid_boost: DirectForm2Transposed<f32>,
     eq:            ThreeBandEq,
     sample_rate:   f32,
 }
 
 impl PreampProcessor {
     pub fn new(sample_rate: f32) -> Self {
-        Self {
-            tight_hpf:   TightHpf::new(sample_rate),
-            fizz_lpf:    FizzKillerLpf::new(sample_rate),
-            eq:          ThreeBandEq::new(sample_rate),
+        // Dummy coefficients for zero-allocation init
+        let default_coeffs = Coefficients::<f32> { a1: 0.0, a2: 0.0, b0: 1.0, b1: 0.0, b2: 0.0 };
+        let mut proc = Self {
+            tight_hpf:     TightHpf::new(sample_rate),
+            fizz_lpf:      FizzKillerLpf::new(sample_rate),
+            pre_mid_boost: DirectForm2Transposed::<f32>::new(default_coeffs),
+            eq:            ThreeBandEq::new(sample_rate),
             sample_rate,
-        }
+        };
+        proc.update_pre_mid_boost(sample_rate);
+        proc
     }
 
     /// Pre-allocate internal state for worst-case sample rate.
@@ -179,10 +185,23 @@ impl PreampProcessor {
         self.set_sample_rate(max_sample_rate);
     }
 
+    /// Update the pre-distortion mid-push filter ("Tubescreamer" boost).
+    /// 700Hz, +4.0dB, Q=1.0 — only used in HighGain mode.
+    fn update_pre_mid_boost(&mut self, sr: f32) {
+        // +4.0 dB → linear voltage gain = 10^(4.0/20) ≈ 1.585
+        let gain_lin = 10.0_f32.powf(4.0 / 20.0);
+        if let Ok(c) = Coefficients::<f32>::from_params(
+            Type::PeakingEQ(gain_lin), sr.hz(), 700.0_f32.hz(), 1.0,
+        ) {
+            self.pre_mid_boost.update_coefficients(c);
+        }
+    }
+
     pub fn set_sample_rate(&mut self, sr: f32) {
         self.sample_rate = sr;
         self.tight_hpf.set_sample_rate(sr);
         self.fizz_lpf.set_sample_rate(sr);
+        self.update_pre_mid_boost(sr);
         self.eq.set_sample_rate(sr);
     }
 
@@ -237,6 +256,10 @@ impl PreampProcessor {
                     PreampDriveMode::ModerateDrive => {
                         // Moderate: sweep de 10x a 316x (+20dB a +50dB)
                         let drive_linear = 10.0_f32.powf(1.0 + gain * 2.5);
+
+                        // Pre-distortion HPF: prevent fuzz-like low-end mud
+                        s = self.tight_hpf.process(s);
+
                         asymmetric_soft_clip(s * drive_linear)
                     }
                     PreampDriveMode::HighGain => {
@@ -246,14 +269,17 @@ impl PreampProcessor {
                         // 1. Pre-distortion HPF: remove low-end antes da clipagem
                         s = self.tight_hpf.process(s);
 
-                        // 2. Multi-stage saturation
+                        // 2. Tubescreamer mid-push: +4dB at 700Hz for cut & presence
+                        s = self.pre_mid_boost.run(s);
+
+                        // 3. Multi-stage saturation
                         s *= drive_linear;
                         s = hard_clip(s, 1.2);          // stage 1: hard clip
                         s = asymmetric_soft_clip(s);    // stage 2: tube softening
                         s *= 1.15;                      // hot boost post-clip
                         s = hard_clip(s, 1.0);          // output guard
 
-                        // 3. Post-distortion LPF: remove fizz digital
+                        // 4. Post-distortion LPF: remove fizz digital
                         s = self.fizz_lpf.process(s);
                         s
                     }

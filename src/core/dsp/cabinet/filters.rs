@@ -42,6 +42,7 @@ pub struct SpeakerModel {
     mic_distance_shelf: DirectForm2Transposed<f32>,
     cab_resonance: DirectForm2Transposed<f32>,
     cab_notch: DirectForm2Transposed<f32>,
+    v30_presence_peak: DirectForm2Transposed<f32>,
     sample_rate: f32,
     cab_dim: CabinetDimension,
 }
@@ -56,6 +57,7 @@ impl SpeakerModel {
             mic_distance_shelf: DirectForm2Transposed::<f32>::new(default_coeffs),
             cab_resonance: DirectForm2Transposed::<f32>::new(default_coeffs),
             cab_notch: DirectForm2Transposed::<f32>::new(default_coeffs),
+            v30_presence_peak: DirectForm2Transposed::<f32>::new(default_coeffs),
             sample_rate,
             cab_dim: CabinetDimension::OneByTwelve,
         }
@@ -75,8 +77,8 @@ impl SpeakerModel {
             self.mic_position_lpf.update_coefficients(c);
         }
         
-        // 2. High shelf down to -12dB above 3kHz
-        let high_shelf_gain = -12.0 * mic_pos;
+        // 2. High shelf down to -8dB above 3kHz (reduced from -12dB for more air)
+        let high_shelf_gain = -8.0 * mic_pos;
         if let Ok(c) = Coefficients::<f32>::from_params(Type::HighShelf(high_shelf_gain), fs, 3000.0_f32.hz(), 0.707) {
             self.mic_position_shelf.update_coefficients(c);
         }
@@ -106,12 +108,22 @@ impl SpeakerModel {
                 self.cab_notch.update_coefficients(c);
             }
         }
+
+        // V30 speaker presence peak: +4.5dB at 2500Hz, Q=1.2
+        // Signature "bark" of a Vintage 30 — adds presence and cut
+        let v30_gain_lin = 10.0_f32.powf(4.5 / 20.0); // +4.5 dB → ≈1.679 linear
+        if let Ok(c) = Coefficients::<f32>::from_params(
+            Type::PeakingEQ(v30_gain_lin), fs, 2500.0_f32.hz(), 1.2,
+        ) {
+            self.v30_presence_peak.update_coefficients(c);
+        }
     }
 
     pub fn process(&mut self, mut sample: f32) -> f32 {
         sample = self.mic_position_lpf.run(sample);
         sample = self.mic_position_shelf.run(sample);
         sample = self.mic_distance_shelf.run(sample);
+        sample = self.v30_presence_peak.run(sample);
         sample = self.cab_resonance.run(sample);
         if self.cab_dim == CabinetDimension::FourByTwelve {
             sample = self.cab_notch.run(sample);
