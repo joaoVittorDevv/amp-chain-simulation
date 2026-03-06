@@ -23,7 +23,7 @@ pub fn draw_signal_chain(ui: &mut egui::Ui, panel_open: &mut bool) {
     );
     
     // Node/Box
-    let node_width = 40.0;
+    let node_width = 60.0;
     let node_height = 40.0;
     let node_x_center = end_x - 30.0; // Place it near the end
     let node_rect = egui::Rect::from_center_size(
@@ -32,7 +32,7 @@ pub fn draw_signal_chain(ui: &mut egui::Ui, panel_open: &mut bool) {
     );
     
     // Add interaction to it
-    let node_response = ui.interact(node_rect, egui::Id::new("distortion_node"), egui::Sense::click_and_drag());
+    let node_response = ui.interact(node_rect, egui::Id::new("cabinet_node"), egui::Sense::click_and_drag());
     
     if node_response.clicked() {
         *panel_open = !*panel_open;
@@ -58,7 +58,7 @@ pub fn draw_signal_chain(ui: &mut egui::Ui, panel_open: &mut bool) {
     painter.text(
         node_rect.center(),
         egui::Align2::CENTER_CENTER,
-        "DIST",
+        "CABINET",
         egui::FontId::proportional(12.0),
         egui::Color32::from_rgb(200, 200, 200),
     );

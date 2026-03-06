@@ -5,8 +5,21 @@ use rtrb::{RingBuffer, Consumer};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
+use distortion::core::dsp::{AnalyzerDsp, CabinetProcessor, FFT_SIZE};
+use distortion::core::state::plugin_params::CabinetDimension;
 use distortion::core::ui::render_shared_panels;
+use nih_plug::params::enums::Enum;
+
+/// Estado do cabinet compartilhado entre a UI (eframe) e a thread de áudio (CPAL).
+/// Escrito pela UI e lido pelo audio callback: uso de Mutex é seguro aqui pois
+/// o audio callback usa `try_lock()` — nunca bloqueia a thread RT.
+#[derive(Clone, Copy)]
+struct CabinetState {
+    mic_pos: f32,
+    mic_dist: f32,
+    cab_dim: CabinetDimension,
+    bypass: bool,
+}
 
 #[derive(Clone)]
 struct DeviceContext {
@@ -64,7 +77,9 @@ struct StandaloneApp {
     show_settings: bool,
     is_loading: bool,
     panel_open: bool,
-    bypass: bool,
+
+    /// Estado do Cabinet: UI escreve, worker de áudio lê via try_lock().
+    cabinet_state: Arc<Mutex<CabinetState>>,
 
     tx_cmd: Sender<AudioCommand>,
     rx_event: Receiver<AudioEvent>,
@@ -92,7 +107,8 @@ fn beautify_linux_name(raw: &str, is_input: bool) -> (String, bool) {
 fn audio_worker(
     rx_cmd: Receiver<AudioCommand>,
     tx_event: Sender<AudioEvent>,
-    consumer_mutex: Arc<Mutex<Option<Consumer<f32>>>>
+    consumer_mutex: Arc<Mutex<Option<Consumer<f32>>>>,
+    cabinet_state: Arc<Mutex<CabinetState>>,
 ) {
     let mut _input_stream: Option<Stream> = None;
     let mut _output_stream: Option<Stream> = None;
@@ -158,14 +174,27 @@ fn audio_worker(
                     *cons_lock = Some(analyzer_consumer);
                 }
                 
-                // Passthrough RingBuffer
+                // Passthrough RingBuffer (L + R separados para preserve stereo)
                 let has_both = input.is_some() && output.is_some();
                 let (mut pt_producer, mut pt_consumer) = if has_both {
-                    let (p, c) = RingBuffer::new((buffer_size * 4).max(1024) as usize);
+                    let (p, c) = RingBuffer::new((buffer_size * 8).max(2048) as usize);
                     (Some(p), Some(c))
                 } else {
                     (None, None)
                 };
+
+                // Criar processadores de cabinet para input stream (L+R).
+                // Pré-alocados aqui (safe zone), nunca alocados no callback de áudio.
+                let sample_rate_for_cabinet = if let Some(ref inp) = input {
+                    // Tentamos pegar o SR do dispositivo; fallback 44100
+                    let _ = inp;
+                    44100.0_f32
+                } else { 44100.0_f32 };
+                let mut cabinet_l = CabinetProcessor::new(sample_rate_for_cabinet);
+                let mut cabinet_r = CabinetProcessor::new(sample_rate_for_cabinet);
+                cabinet_l.initialize(192000.0); // worst-case pre-alloc
+                cabinet_r.initialize(192000.0);
+                let cabinet_state_clone = cabinet_state.clone();
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
                     
@@ -185,13 +214,50 @@ fn audio_worker(
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[f32], _: &_| {
+                                                    // Lê parâmetros da UI via try_lock (nunca bloqueia)
+                                                    let cab_snapshot = cabinet_state_clone
+                                                        .try_lock()
+                                                        .map(|g| *g)
+                                                        .unwrap_or(CabinetState {
+                                                            mic_pos: 0.5, mic_dist: 0.0,
+                                                            cab_dim: CabinetDimension::OneByTwelve,
+                                                            bypass: false,
+                                                        });
+
+                                                    // Atualiza params dos processadores (bloco-a-bloco)
+                                                    if !cab_snapshot.bypass {
+                                                        cabinet_l.update_params(
+                                                            cab_snapshot.mic_pos,
+                                                            cab_snapshot.mic_dist,
+                                                            cab_snapshot.cab_dim,
+                                                        );
+                                                        cabinet_r.update_params(
+                                                            cab_snapshot.mic_pos,
+                                                            cab_snapshot.mic_dist,
+                                                            cab_snapshot.cab_dim,
+                                                        );
+                                                    }
+
                                                     for frame in data.chunks(channels as usize) {
-                                                        let l = frame.get(l_idx).copied().unwrap_or(0.0);
-                                                        let r = frame.get(r_idx).copied().unwrap_or(0.0);
+                                                        let mut l = frame.get(l_idx).copied().unwrap_or(0.0);
+                                                        let mut r = frame.get(r_idx).copied().unwrap_or(0.0);
+
+                                                        // Aplica DSP do cabinet (ou bypass)
+                                                        if !cab_snapshot.bypass {
+                                                            l = cabinet_l.process(l);
+                                                            r = cabinet_r.process(r);
+                                                            if l.is_nan() || l.is_infinite() { l = 0.0; }
+                                                            if r.is_nan() || r.is_infinite() { r = 0.0; }
+                                                        }
+
+                                                        // Tap do analyzer APÓS o cabinet (mostra resultado real)
                                                         let mix = (l + r) * 0.5;
                                                         let _ = analyzer_producer.push(mix);
+
+                                                        // Passthrough para output: envia L e R
                                                         if let Some(pp) = pt_producer.as_mut() {
-                                                            let _ = pp.push(mix);
+                                                            let _ = pp.push(l);
+                                                            let _ = pp.push(r);
                                                         }
                                                     }
                                                 },
@@ -200,16 +266,41 @@ fn audio_worker(
                                             )
                                         },
                                         cpal::SampleFormat::I16 => {
+                                            // Processadores separados para o branch I16 (F32 já moveu os anteriores)
+                                            let mut cab_l_i16 = CabinetProcessor::new(44100.0);
+                                            let mut cab_r_i16 = CabinetProcessor::new(44100.0);
+                                            cab_l_i16.initialize(192000.0);
+                                            cab_r_i16.initialize(192000.0);
+                                            let cab_state_i16 = cabinet_state.clone();
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[i16], _: &_| {
+                                                    let cab_snapshot = cab_state_i16
+                                                        .try_lock()
+                                                        .map(|g| *g)
+                                                        .unwrap_or(CabinetState {
+                                                            mic_pos: 0.5, mic_dist: 0.0,
+                                                            cab_dim: CabinetDimension::OneByTwelve,
+                                                            bypass: false,
+                                                        });
+                                                    if !cab_snapshot.bypass {
+                                                        cab_l_i16.update_params(cab_snapshot.mic_pos, cab_snapshot.mic_dist, cab_snapshot.cab_dim);
+                                                        cab_r_i16.update_params(cab_snapshot.mic_pos, cab_snapshot.mic_dist, cab_snapshot.cab_dim);
+                                                    }
                                                     for frame in data.chunks(channels as usize) {
-                                                        let l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
-                                                        let r = frame.get(r_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
+                                                        let mut l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
+                                                        let mut r = frame.get(r_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
+                                                        if !cab_snapshot.bypass {
+                                                            l = cab_l_i16.process(l);
+                                                            r = cab_r_i16.process(r);
+                                                            if l.is_nan() || l.is_infinite() { l = 0.0; }
+                                                            if r.is_nan() || r.is_infinite() { r = 0.0; }
+                                                        }
                                                         let mix = (l + r) * 0.5;
                                                         let _ = analyzer_producer.push(mix);
                                                         if let Some(pp) = pt_producer.as_mut() {
-                                                            let _ = pp.push(mix);
+                                                            let _ = pp.push(l);
+                                                            let _ = pp.push(r);
                                                         }
                                                     }
                                                 },
@@ -259,12 +350,17 @@ fn audio_worker(
                                                 &strict_config,
                                                 move |data: &mut [f32], _: &_| {
                                                     for frame in data.chunks_mut(channels as usize) {
-                                                        let sample = match pt_consumer.as_mut() {
-                                                            Some(pc) => pc.pop().unwrap_or(0.0),
-                                                            None => 0.0,
+                                                        // Recebe L e R separados do ring buffer
+                                                        let (l_sample, r_sample) = match pt_consumer.as_mut() {
+                                                            Some(pc) => {
+                                                                let l = pc.pop().unwrap_or(0.0);
+                                                                let r = pc.pop().unwrap_or(l);
+                                                                (l, r)
+                                                            }
+                                                            None => (0.0, 0.0),
                                                         };
-                                                        if let Some(l) = frame.get_mut(l_idx) { *l = sample; }
-                                                        if let Some(r) = frame.get_mut(r_idx) { *r = sample; }
+                                                        if let Some(l) = frame.get_mut(l_idx) { *l = l_sample; }
+                                                        if let Some(r) = frame.get_mut(r_idx) { *r = r_sample; }
                                                     }
                                                 },
                                                 |err| eprintln!("Output error: {:?}", err),
@@ -345,9 +441,17 @@ impl StandaloneApp {
         let (tx_cmd, rx_worker) = channel();
         let (tx_worker, rx_event) = channel();
 
+        let cabinet_state = Arc::new(Mutex::new(CabinetState {
+            mic_pos: 0.5,
+            mic_dist: 0.0,
+            cab_dim: CabinetDimension::OneByTwelve,
+            bypass: false,
+        }));
+
         let cons_clone = cons_arc.clone();
+        let cab_state_clone = cabinet_state.clone();
         thread::spawn(move || {
-            audio_worker(rx_worker, tx_worker, cons_clone);
+            audio_worker(rx_worker, tx_worker, cons_clone, cab_state_clone);
         });
 
         let mut app = Self {
@@ -381,7 +485,7 @@ impl StandaloneApp {
             show_settings: false,
             is_loading: true,
             panel_open: true,
-            bypass: false,
+            cabinet_state,
             tx_cmd,
             rx_event,
         };
@@ -481,11 +585,13 @@ impl eframe::App for StandaloneApp {
                 
                 ui.add_space(20.0);
                 
-                // Botão de Bypass
-                let mut bypass_toggled = self.bypass;
+                // Botão de Bypass — escreve no estado compartilhado
+                let current_bypass = self.cabinet_state.lock().map(|g| g.bypass).unwrap_or(false);
+                let mut bypass_toggled = current_bypass;
                 if ui.checkbox(&mut bypass_toggled, "Bypass").changed() {
-                    self.bypass = bypass_toggled;
-                    // Lógica DSP do bypass será inserida depois!
+                    if let Ok(mut st) = self.cabinet_state.lock() {
+                        st.bypass = bypass_toggled;
+                    }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -709,17 +815,15 @@ impl eframe::App for StandaloneApp {
                         ui.label(egui::RichText::new(caption).small().color(egui::Color32::GRAY));
                         
                         ui.add_space(8.0);
-                        if self.buffer_power == self.buffer_range_max {
-                            if ui.button("➕ Preciso de mais Estabilidade (Max Buffers)").clicked() {
-                                self.buffer_range_min = self.buffer_range_max;
-                                self.buffer_range_max = (self.buffer_range_max + 3).min(15);
-                            }
+                        if self.buffer_power == self.buffer_range_max
+                            && ui.button("➕ Preciso de mais Estabilidade (Max Buffers)").clicked() {
+                            self.buffer_range_min = self.buffer_range_max;
+                            self.buffer_range_max = (self.buffer_range_max + 3).min(15);
                         }
-                        if self.buffer_power == self.buffer_range_min {
-                            if ui.button("➖ Preciso de menos Latência (Baixar Piso)").clicked() {
-                                self.buffer_range_max = self.buffer_range_min;
-                                self.buffer_range_min = self.buffer_range_min.saturating_sub(3).max(4); 
-                            }
+                        if self.buffer_power == self.buffer_range_min
+                            && ui.button("➖ Preciso de menos Latência (Baixar Piso)").clicked() {
+                            self.buffer_range_max = self.buffer_range_min;
+                            self.buffer_range_min = self.buffer_range_min.saturating_sub(3).max(4);
                         }
                         
                         if let Some(err_desc) = &self.last_audio_error {
@@ -768,7 +872,38 @@ impl eframe::App for StandaloneApp {
             self.show_error_popup = open;
         }
 
-        render_shared_panels(ctx, &mut self.panel_open, &self.analyzer.spectrum, FFT_SIZE);
+        // Lê estado atual para a UI
+        let (cur_pos, cur_dist, cur_dim) = self.cabinet_state.lock()
+            .map(|g| (g.mic_pos, g.mic_dist, g.cab_dim))
+            .unwrap_or((0.5, 0.0, CabinetDimension::OneByTwelve));
+
+        let mut ui_pos = cur_pos;
+        let mut ui_dist = cur_dist;
+        let mut ui_dim = cur_dim;
+
+        render_shared_panels(ctx, &mut self.panel_open, &self.analyzer.spectrum, FFT_SIZE, |ui| {
+            ui.label("Mic Position:");
+            if ui.add(egui::Slider::new(&mut ui_pos, 0.0..=1.0)).changed() {
+                if let Ok(mut st) = self.cabinet_state.lock() { st.mic_pos = ui_pos; }
+            }
+
+            ui.label("Mic Distance:");
+            if ui.add(egui::Slider::new(&mut ui_dist, 0.0..=1.0)).changed() {
+                if let Ok(mut st) = self.cabinet_state.lock() { st.mic_dist = ui_dist; }
+            }
+
+            ui.label("Cabinet Size:");
+            egui::ComboBox::from_id_salt("cab_selector")
+                .selected_text(CabinetDimension::variants()[ui_dim.to_index()])
+                .show_ui(ui, |ui| {
+                    for (i, &name) in CabinetDimension::variants().iter().enumerate() {
+                        let variant = CabinetDimension::from_index(i);
+                        if ui.selectable_value(&mut ui_dim, variant, name).changed() {
+                            if let Ok(mut st) = self.cabinet_state.lock() { st.cab_dim = ui_dim; }
+                        }
+                    }
+                });
+        });
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

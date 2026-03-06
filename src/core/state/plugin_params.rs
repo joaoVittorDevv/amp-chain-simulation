@@ -14,6 +14,16 @@ pub enum InputSelect {
     Input2,
 }
 
+#[derive(Enum, PartialEq, Clone, Copy, Debug)]
+pub enum CabinetDimension {
+    #[name = "1x12"]
+    OneByTwelve,
+    #[name = "2x12"]
+    TwoByTwelve,
+    #[name = "4x12"]
+    FourByTwelve,
+}
+
 #[derive(Params)]
 pub struct BaseIOParams {
     #[persist = "editor-state"]
@@ -27,6 +37,15 @@ pub struct BaseIOParams {
 
     #[id = "bypass"]
     pub bypass: BoolParam,
+
+    #[id = "mic_position"]
+    pub mic_position: FloatParam,
+
+    #[id = "mic_distance"]
+    pub mic_distance: FloatParam,
+
+    #[id = "cabinet_dimension"]
+    pub cabinet_dimension: EnumParam<CabinetDimension>,
 }
 
 pub struct EditorState {
@@ -49,15 +68,31 @@ impl Default for BaseIOParams {
                 FloatRange::Skewed {
                     min: util::db_to_gain(-30.0),
                     max: util::db_to_gain(30.0),
-                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
-                },
-            )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+                factor: FloatRange::gain_skew_factor(-30.0, 30.0),
+            },
+        )
+        .with_smoother(SmoothingStyle::Logarithmic(50.0))
+        .with_unit(" dB")
+        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-            bypass: BoolParam::new("Bypass", false),
+        bypass: BoolParam::new("Bypass", false),
+
+        mic_position: FloatParam::new(
+            "Mic Position",
+            0.5,
+            FloatRange::Linear { min: 0.0, max: 1.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(50.0)),
+
+        mic_distance: FloatParam::new(
+            "Mic Distance",
+            0.0,
+            FloatRange::Linear { min: 0.0, max: 1.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(50.0)),
+
+        cabinet_dimension: EnumParam::new("Cabinet", CabinetDimension::OneByTwelve),
         }
     }
 }

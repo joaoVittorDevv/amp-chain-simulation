@@ -20,6 +20,8 @@ pub struct BaseIO {
     params: Arc<BaseIOParams>,
     analyzer_consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     analyzer_producer: Producer<f32>,
+    cabinet_l: dsp::CabinetProcessor,
+    cabinet_r: dsp::CabinetProcessor,
 }
 
 impl Default for BaseIO {
@@ -30,6 +32,8 @@ impl Default for BaseIO {
             params: Arc::new(BaseIOParams::default()),
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
+            cabinet_l: dsp::CabinetProcessor::new(44100.0),
+            cabinet_r: dsp::CabinetProcessor::new(44100.0),
         }
     }
 }
@@ -124,7 +128,39 @@ impl Plugin for BaseIO {
                     });
                 });
 
-                ui::render_shared_panels(egui_ctx, &mut state.panel_open, &state.analyzer.spectrum, dsp::FFT_SIZE);
+                use crate::core::state::plugin_params::CabinetDimension;
+                ui::render_shared_panels(
+                    egui_ctx,
+                    &mut state.panel_open,
+                    &state.analyzer.spectrum,
+                    dsp::FFT_SIZE,
+                    |ui| {
+                        ui.label("Mic Position:");
+                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_position, setter));
+
+                        ui.label("Mic Distance:");
+                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_distance, setter));
+
+                        ui.label("Cabinet Size:");
+                        let current_cab = state.params.cabinet_dimension.value();
+                        let mut new_cab = current_cab;
+                        
+                        egui::ComboBox::from_id_salt("cab_selector")
+                            .selected_text(CabinetDimension::variants()[current_cab.to_index()])
+                            .show_ui(ui, |ui| {
+                                for (i, &name) in CabinetDimension::variants().iter().enumerate() {
+                                    let variant = CabinetDimension::from_index(i);
+                                    ui.selectable_value(&mut new_cab, variant, name);
+                                }
+                            });
+
+                        if new_cab != current_cab {
+                            setter.begin_set_parameter(&state.params.cabinet_dimension);
+                            setter.set_parameter(&state.params.cabinet_dimension, new_cab);
+                            setter.end_set_parameter(&state.params.cabinet_dimension);
+                        }
+                    }
+                );
             }
         )
     }
@@ -132,9 +168,13 @@ impl Plugin for BaseIO {
     fn initialize(
         &mut self,
         _audio_io_layout: &AudioIOLayout,
-        _buffer_config: &BufferConfig,
+        buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        let max_sr = buffer_config.sample_rate;
+        // Allocate buffers and update filters to current SR
+        self.cabinet_l.initialize(max_sr);
+        self.cabinet_r.initialize(max_sr);
         true
     }
 
@@ -148,7 +188,13 @@ impl Plugin for BaseIO {
     ) -> ProcessStatus {
         let input_mode = self.params.input_select.value();
         let bypass = self.params.bypass.value();
+        let mic_pos = self.params.mic_position.smoothed.next();
+        let mic_dist = self.params.mic_distance.smoothed.next();
+        let cab_dim = self.params.cabinet_dimension.value(); // Not smoothed since EnumParam
         
+        self.cabinet_l.update_params(mic_pos, mic_dist, cab_dim);
+        self.cabinet_r.update_params(mic_pos, mic_dist, cab_dim);
+
         for mut channel_samples in buffer.iter_samples() {
             let gain = self.params.gain.smoothed.next();
 
@@ -165,6 +211,10 @@ impl Plugin for BaseIO {
             if !bypass {
                 l_out *= gain;
                 r_out *= gain;
+
+                // Process Cabinet
+                l_out = self.cabinet_l.process(l_out);
+                r_out = self.cabinet_r.process(r_out);
             } else {
                 l_out = l_in; // bypass simply forwards original
                 r_out = r_in;
