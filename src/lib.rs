@@ -1,5 +1,5 @@
 use nih_plug::prelude::*;
-use nih_plug_egui::{create_egui_editor, egui, EguiState};
+use nih_plug_egui::{create_egui_editor, egui};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{Arc, Mutex};
 
@@ -14,43 +14,12 @@ pub const APP_EMAIL: &str = "joaovittorh1@gmail.com";
 pub const CLAP_ID: &str = ".distortion";
 pub const VST3_ID: [u8; 16] = [0xA9, 0xED, 0x13, 0x81, 0x0D, 0xBC, 0x4A, 0x4A, 0x98, 0x54, 0x0F, 0x0F, 0x67, 0x1E, 0x9E, 0x1A]; 
 // ------------------------------------------
-
-#[derive(Enum, PartialEq, Clone, Copy, Debug)]
-pub enum InputSelect {
-    #[name = "1/2 (Stereo)"]
-    Stereo,
-    #[name = "Input 1 (Mic)"]
-    Input1,
-    #[name = "Input 2 (Guitar)"]
-    Input2,
-}
+use crate::core::state::plugin_params::{BaseIOParams, EditorState, InputSelect};
 
 pub struct BaseIO {
     params: Arc<BaseIOParams>,
     analyzer_consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     analyzer_producer: Producer<f32>,
-}
-
-#[derive(Params)]
-struct BaseIOParams {
-    #[persist = "editor-state"]
-    editor_state: Arc<EguiState>,
-
-    #[id = "input"]
-    pub input_select: EnumParam<InputSelect>,
-
-    #[id = "gain"]
-    pub gain: FloatParam,
-
-    #[id = "bypass"]
-    pub bypass: BoolParam,
-}
-
-struct EditorState {
-    params: Arc<BaseIOParams>,
-    analyzer: dsp::AnalyzerDsp,
-    consumer: Arc<Mutex<Option<Consumer<f32>>>>,
-    panel_open: bool,
 }
 
 impl Default for BaseIO {
@@ -61,32 +30,6 @@ impl Default for BaseIO {
             params: Arc::new(BaseIOParams::default()),
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
-        }
-    }
-}
-
-impl Default for BaseIOParams {
-    fn default() -> Self {
-        Self {
-            editor_state: EguiState::from_size(800, 450),
-
-            input_select: EnumParam::new("Input Source", InputSelect::Stereo),
-
-            gain: FloatParam::new(
-                "Gain",
-                util::db_to_gain(0.0),
-                FloatRange::Skewed {
-                    min: util::db_to_gain(-30.0),
-                    max: util::db_to_gain(30.0),
-                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
-                },
-            )
-            .with_smoother(SmoothingStyle::Logarithmic(50.0))
-            .with_unit(" dB")
-            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
-
-            bypass: BoolParam::new("Bypass", false),
         }
     }
 }
@@ -181,34 +124,7 @@ impl Plugin for BaseIO {
                     });
                 });
 
-                if state.panel_open {
-                    egui::TopBottomPanel::bottom("plugin_panel")
-                        .resizable(true)
-                        .min_height(100.0)
-                        .show(egui_ctx, |ui| {
-                            ui.heading("Distortion Settings");
-                            ui.separator();
-                            ui.horizontal(|ui| {
-                                ui.label("Drive:");
-                                let mut dummy_drive = 0.5;
-                                ui.add(egui::Slider::new(&mut dummy_drive, 0.0..=1.0));
-
-                                ui.label("Tone:");
-                                let mut dummy_tone = 0.5;
-                                ui.add(egui::Slider::new(&mut dummy_tone, 0.0..=1.0));
-                            });
-                        });
-                }
-
-                egui::TopBottomPanel::bottom("signal_chain_panel")
-                    .resizable(false)
-                    .show(egui_ctx, |ui| {
-                        ui::draw_signal_chain(ui, &mut state.panel_open);
-                    });
-
-                egui::CentralPanel::default().show(egui_ctx, |ui| {
-                    ui::draw_spectrum(ui, &state.analyzer.spectrum, dsp::FFT_SIZE);
-                });
+                ui::render_shared_panels(egui_ctx, &mut state.panel_open, &state.analyzer.spectrum, dsp::FFT_SIZE);
             }
         )
     }

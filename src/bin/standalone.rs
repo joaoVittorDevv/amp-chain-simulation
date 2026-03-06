@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
-use distortion::core::ui::{draw_spectrum, draw_signal_chain};
+use distortion::core::ui::render_shared_panels;
 
 #[derive(Clone)]
 struct DeviceContext {
@@ -768,34 +768,7 @@ impl eframe::App for StandaloneApp {
             self.show_error_popup = open;
         }
 
-        if self.panel_open {
-            egui::TopBottomPanel::bottom("plugin_panel")
-                .resizable(true)
-                .min_height(100.0)
-                .show(ctx, |ui| {
-                    ui.heading("Distortion Settings");
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        ui.label("Drive:");
-                        let mut dummy_drive = 0.5;
-                        ui.add(egui::Slider::new(&mut dummy_drive, 0.0..=1.0));
-
-                        ui.label("Tone:");
-                        let mut dummy_tone = 0.5;
-                        ui.add(egui::Slider::new(&mut dummy_tone, 0.0..=1.0));
-                    });
-                });
-        }
-
-        egui::TopBottomPanel::bottom("signal_chain_panel")
-            .resizable(false)
-            .show(ctx, |ui| {
-                draw_signal_chain(ui, &mut self.panel_open);
-            });
-
-        egui::CentralPanel::default().show(ctx, |ui| {
-            draw_spectrum(ui, &self.analyzer.spectrum, FFT_SIZE);
-        });
+        render_shared_panels(ctx, &mut self.panel_open, &self.analyzer.spectrum, FFT_SIZE);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
