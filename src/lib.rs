@@ -26,11 +26,16 @@ pub struct BaseIO {
     preamp_r: dsp::PreampProcessor,
     cabinet_l: dsp::CabinetProcessor,
     cabinet_r: dsp::CabinetProcessor,
+    custom_ir: Arc<arc_swap::ArcSwapOption<crate::core::dsp::cabinet::ir_convolver::IrData>>,
+    cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
 }
 
 impl Default for BaseIO {
     fn default() -> Self {
         let (producer, consumer) = RingBuffer::new(1024 * 64);
+        
+        let custom_ir = Arc::new(arc_swap::ArcSwapOption::const_empty());
+        let cab_clipping_meter = Arc::new(nih_plug::params::smoothing::AtomicF32::new(0.0));
         
         Self {
             params: Arc::new(BaseIOParams::default()),
@@ -38,8 +43,10 @@ impl Default for BaseIO {
             analyzer_producer: producer,
             preamp_l: dsp::PreampProcessor::new(44100.0),
             preamp_r: dsp::PreampProcessor::new(44100.0),
-            cabinet_l: dsp::CabinetProcessor::new(44100.0),
-            cabinet_r: dsp::CabinetProcessor::new(44100.0),
+            cabinet_l: dsp::CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone()),
+            cabinet_r: dsp::CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone()),
+            custom_ir,
+            cab_clipping_meter,
         }
     }
 }
@@ -80,6 +87,10 @@ impl Plugin for BaseIO {
                 analyzer: dsp::AnalyzerDsp::default(),
                 consumer: consumer_mutex,
                 active_panel: ActivePanel::None,
+                custom_ir: self.custom_ir.clone(),
+                cab_clipping_meter: self.cab_clipping_meter.clone(),
+                loaded_ir_name: "No IR loaded".to_string(),
+                ir_load_error: None,
             },
             |_, _| {},
             move |egui_ctx, setter, state| {
@@ -199,27 +210,123 @@ impl Plugin for BaseIO {
                     },
                     // --- Cabinet closure ---
                     |ui| {
-                        ui.label("Mic Position:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_position, setter).with_width(80.0));
-                        ui.label("Mic Distance:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_distance, setter).with_width(80.0));
+                        ui.vertical(|ui| {
+                            ui.horizontal(|ui| {
+                                let current_custom_ir = state.params.use_custom_ir.value();
+                                let mut new_custom_ir = current_custom_ir;
+                                if ui.checkbox(&mut new_custom_ir, "Use Custom IR").changed() {
+                                    setter.begin_set_parameter(&state.params.use_custom_ir);
+                                    setter.set_parameter(&state.params.use_custom_ir, new_custom_ir);
+                                    setter.end_set_parameter(&state.params.use_custom_ir);
+                                }
 
-                        ui.label("Cabinet Size:");
-                        let current_cab = state.params.cabinet_dimension.value();
-                        let mut new_cab = current_cab;
-                        egui::ComboBox::from_id_salt("cab_selector")
-                            .selected_text(CabinetDimension::variants()[current_cab.to_index()])
-                            .show_ui(ui, |ui| {
-                                for (i, &name) in CabinetDimension::variants().iter().enumerate() {
-                                    let variant = CabinetDimension::from_index(i);
-                                    ui.selectable_value(&mut new_cab, variant, name);
+                                if new_custom_ir {
+                                    if ui.button("📁 Load IR").clicked() {
+                                        if let Some(path) = rfd::FileDialog::new().add_filter("wav", &["wav"]).pick_file() {
+                                            match hound::WavReader::open(&path) {
+                                                Ok(mut reader) => {
+                                                    let spec = reader.spec();
+                                                    if spec.sample_format == hound::SampleFormat::Int || spec.sample_format == hound::SampleFormat::Float {
+                                                        let mut samples: Vec<f32> = match spec.sample_format {
+                                                            hound::SampleFormat::Int => {
+                                                                if spec.bits_per_sample == 16 {
+                                                                    reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32).collect()
+                                                                } else if spec.bits_per_sample == 24 {
+                                                                    reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / 8388607.0).collect()
+                                                                } else {
+                                                                    reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / i32::MAX as f32).collect()
+                                                                }
+                                                            },
+                                                            hound::SampleFormat::Float => {
+                                                                reader.samples::<f32>().filter_map(|s| s.ok()).collect()
+                                                            }
+                                                        };
+                                                        
+                                                        let channels = spec.channels as usize;
+                                                        if channels > 1 && !samples.is_empty() {
+                                                            samples = samples.chunks(channels).map(|c| c[0]).collect();
+                                                        }
+                                                        
+                                                        if !samples.is_empty() {
+                                                            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                                            let ds = crate::core::dsp::cabinet::ir_convolver::IrData::new(&samples, name.clone());
+                                                            state.custom_ir.store(Some(Arc::new(ds)));
+                                                            state.loaded_ir_name = name;
+                                                            state.ir_load_error = None;
+                                                        }
+                                                    } else {
+                                                        state.ir_load_error = Some("Unsupported WAV format".to_string());
+                                                    }
+                                                },
+                                                Err(e) => {
+                                                    state.ir_load_error = Some(format!("Error: {}", e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    
+                                    ui.label(format!("Loaded: {}", state.loaded_ir_name));
+                                    
+                                    if let Some(err) = &state.ir_load_error {
+                                        ui.colored_label(egui::Color32::RED, err);
+                                    }
                                 }
                             });
-                        if new_cab != current_cab {
-                            setter.begin_set_parameter(&state.params.cabinet_dimension);
-                            setter.set_parameter(&state.params.cabinet_dimension, new_cab);
-                            setter.end_set_parameter(&state.params.cabinet_dimension);
-                        }
+
+                            ui.separator();
+                            
+                            ui.horizontal(|ui| {
+                                if !state.params.use_custom_ir.value() {
+                                    ui.label("Mic Position:");
+                                    ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_position, setter).with_width(80.0));
+                                    ui.label("Mic Distance:");
+                                    ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_distance, setter).with_width(80.0));
+
+                                    ui.label("Size:");
+                                    let current_cab = state.params.cabinet_dimension.value();
+                                    let mut new_cab = current_cab;
+                                    egui::ComboBox::from_id_salt("cab_selector")
+                                        .selected_text(CabinetDimension::variants()[current_cab.to_index()])
+                                        .show_ui(ui, |ui| {
+                                            for (i, &name) in CabinetDimension::variants().iter().enumerate() {
+                                                let variant = CabinetDimension::from_index(i);
+                                                ui.selectable_value(&mut new_cab, variant, name);
+                                            }
+                                        });
+                                    if new_cab != current_cab {
+                                        setter.begin_set_parameter(&state.params.cabinet_dimension);
+                                        setter.set_parameter(&state.params.cabinet_dimension, new_cab);
+                                        setter.end_set_parameter(&state.params.cabinet_dimension);
+                                    }
+                                } else {
+                                    ui.label("Algorithmic cabinet bypassed.");
+                                }
+                                
+                                ui.separator();
+                                ui.label("Master Vol:");
+                                ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.cabinet_master_volume, setter).with_width(80.0));
+                                
+                                // Peak meter logic
+                                let current_peak = state.cab_clipping_meter.load(std::sync::atomic::Ordering::Relaxed);
+                                // Decay meter visually so it does not stay frozen. Approximately 0.9 per frame is a fast decay.
+                                state.cab_clipping_meter.store(current_peak * 0.90, std::sync::atomic::Ordering::Relaxed);
+                                let peak_db: f32 = if current_peak > 1e-4 { 20.0 * current_peak.log10() } else { -60.0 };
+                                let fraction = (peak_db.max(-60.0_f32) / 60.0 + 1.0).clamp(0.0_f32, 1.0_f32);
+                                let meter_width = 60.0;
+                                let rect = ui.allocate_exact_size(egui::vec2(meter_width, 10.0), egui::Sense::hover()).0;
+                                let filled_rect = egui::Rect::from_min_max(
+                                    rect.min,
+                                    egui::pos2(rect.min.x + (meter_width * fraction), rect.max.y)
+                                );
+                                let meter_color = if current_peak > 0.99 { egui::Color32::RED } else { egui::Color32::from_rgb(0, 200, 50) };
+                                
+                                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(40, 40, 40));
+                                ui.painter().rect_filled(filled_rect, 0.0, meter_color);
+                                if current_peak > 0.99 {
+                                    ui.colored_label(egui::Color32::RED, "CLIP");
+                                }
+                            });
+                        });
                     },
                 );
             }
@@ -265,12 +372,14 @@ impl Plugin for BaseIO {
         let mic_pos  = self.params.mic_position.smoothed.next();
         let mic_dist = self.params.mic_distance.smoothed.next();
         let cab_dim  = self.params.cabinet_dimension.value();
+        let use_custom_ir = self.params.use_custom_ir.value();
+        let cab_master_vol = self.params.cabinet_master_volume.smoothed.next();
 
         // Block-level coefficient updates (not per-sample)
         self.preamp_l.update_params(bass_db, mid_db, treble_db);
         self.preamp_r.update_params(bass_db, mid_db, treble_db);
-        self.cabinet_l.update_params(mic_pos, mic_dist, cab_dim);
-        self.cabinet_r.update_params(mic_pos, mic_dist, cab_dim);
+        self.cabinet_l.update_params(mic_pos, mic_dist, cab_dim, use_custom_ir, cab_master_vol);
+        self.cabinet_r.update_params(mic_pos, mic_dist, cab_dim, use_custom_ir, cab_master_vol);
 
         for mut channel_samples in buffer.iter_samples() {
             let gain = self.params.gain.smoothed.next();

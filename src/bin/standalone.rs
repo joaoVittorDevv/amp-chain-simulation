@@ -19,6 +19,8 @@ struct CabinetState {
     mic_pos:      f32,
     mic_dist:     f32,
     cab_dim:      CabinetDimension,
+    use_custom_ir: bool,
+    cabinet_master_volume: f32,
     // Preamp
     preamp_input_vol:  f32,
     preamp_gain:       f32,
@@ -91,6 +93,10 @@ struct StandaloneApp {
 
     /// Estado do Cabinet: UI escreve, worker de áudio lê via try_lock().
     cabinet_state: Arc<Mutex<CabinetState>>,
+    custom_ir: Arc<arc_swap::ArcSwapOption<distortion::core::dsp::cabinet::ir_convolver::IrData>>,
+    cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
+    loaded_ir_name: String,
+    ir_load_error: Option<String>,
 
     tx_cmd: Sender<AudioCommand>,
     rx_event: Receiver<AudioEvent>,
@@ -120,6 +126,8 @@ fn audio_worker(
     tx_event: Sender<AudioEvent>,
     consumer_mutex: Arc<Mutex<Option<Consumer<f32>>>>,
     cabinet_state: Arc<Mutex<CabinetState>>,
+    custom_ir: Arc<arc_swap::ArcSwapOption<distortion::core::dsp::cabinet::ir_convolver::IrData>>,
+    cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
 ) {
     let mut _input_stream: Option<Stream> = None;
     let mut _output_stream: Option<Stream> = None;
@@ -196,8 +204,10 @@ fn audio_worker(
 
                 // Criar processadores para input stream (L+R) — pré-alocados na safe zone.
                 let sample_rate_for_cabinet = 44100.0_f32;
-                let mut cabinet_l = CabinetProcessor::new(sample_rate_for_cabinet);
-                let mut cabinet_r = CabinetProcessor::new(sample_rate_for_cabinet);
+                
+                
+                let mut cabinet_l = CabinetProcessor::new(sample_rate_for_cabinet, custom_ir.clone(), cab_clipping_meter.clone());
+                let mut cabinet_r = CabinetProcessor::new(sample_rate_for_cabinet, custom_ir.clone(), cab_clipping_meter.clone());
                 cabinet_l.initialize(192000.0);
                 cabinet_r.initialize(192000.0);
                 let mut preamp_l = PreampProcessor::new(sample_rate_for_cabinet);
@@ -230,6 +240,8 @@ fn audio_worker(
                                                         .unwrap_or(CabinetState {
                                                             mic_pos: 0.5, mic_dist: 0.0,
                                                             cab_dim: CabinetDimension::OneByTwelve,
+                                                            use_custom_ir: false,
+                                                            cabinet_master_volume: 1.0,
                                                             preamp_input_vol: 0.5, preamp_gain: 0.0,
                                                             preamp_bass: 0.0, preamp_mid: 0.0, preamp_treble: 0.0,
                                                             preamp_master: 0.7,
@@ -241,8 +253,8 @@ fn audio_worker(
                                                     if !snap.bypass {
                                                         preamp_l.update_params(snap.preamp_bass, snap.preamp_mid, snap.preamp_treble);
                                                         preamp_r.update_params(snap.preamp_bass, snap.preamp_mid, snap.preamp_treble);
-                                                        cabinet_l.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim);
-                                                        cabinet_r.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim);
+                                                        cabinet_l.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
+                                                        cabinet_r.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
                                                     }
 
                                                     for frame in data.chunks(channels as usize) {
@@ -272,8 +284,8 @@ fn audio_worker(
                                         },
                                         cpal::SampleFormat::I16 => {
                                             // Processadores separados para o branch I16 (F32 já moveu os anteriores)
-                                            let mut cab_l_i16 = CabinetProcessor::new(44100.0);
-                                            let mut cab_r_i16 = CabinetProcessor::new(44100.0);
+                                            let mut cab_l_i16 = CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone());
+                                            let mut cab_r_i16 = CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone());
                                             cab_l_i16.initialize(192000.0);
                                             cab_r_i16.initialize(192000.0);
                                             let cab_state_i16 = cabinet_state.clone();
@@ -286,6 +298,8 @@ fn audio_worker(
                                                         .unwrap_or(CabinetState {
                                                             mic_pos: 0.5, mic_dist: 0.0,
                                                             cab_dim: CabinetDimension::OneByTwelve,
+                                                            use_custom_ir: false,
+                                                            cabinet_master_volume: 1.0,
                                                             preamp_input_vol: 0.5, preamp_gain: 0.0,
                                                             preamp_bass: 0.0, preamp_mid: 0.0, preamp_treble: 0.0,
                                                             preamp_master: 0.7,
@@ -294,8 +308,8 @@ fn audio_worker(
                                                             bypass: false,
                                                         });
                                                     if !snap.bypass {
-                                                        cab_l_i16.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim);
-                                                        cab_r_i16.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim);
+                                                        cab_l_i16.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
+                                                        cab_r_i16.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
                                                     }
                                                     for frame in data.chunks(channels as usize) {
                                                         let mut l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
@@ -455,6 +469,8 @@ impl StandaloneApp {
             mic_pos: 0.5,
             mic_dist: 0.0,
             cab_dim: CabinetDimension::OneByTwelve,
+                                                            use_custom_ir: false,
+                                                            cabinet_master_volume: 1.0,
             preamp_input_vol: 0.5,
             preamp_gain: 0.0,
             preamp_bass: 0.0,
@@ -468,8 +484,12 @@ impl StandaloneApp {
 
         let cons_clone = cons_arc.clone();
         let cab_state_clone = cabinet_state.clone();
+        let custom_ir = Arc::new(arc_swap::ArcSwapOption::const_empty());
+        let cab_clipping_meter = Arc::new(nih_plug::params::smoothing::AtomicF32::new(0.0));
+        let custom_ir_clone = custom_ir.clone();
+        let cab_clip_clone = cab_clipping_meter.clone();
         thread::spawn(move || {
-            audio_worker(rx_worker, tx_worker, cons_clone, cab_state_clone);
+            audio_worker(rx_worker, tx_worker, cons_clone, cab_state_clone, custom_ir_clone, cab_clip_clone);
         });
 
         let mut app = Self {
@@ -504,6 +524,10 @@ impl StandaloneApp {
             is_loading: true,
             active_panel: ActivePanel::None,
             cabinet_state,
+            custom_ir,
+            cab_clipping_meter,
+            loaded_ir_name: "No IR loaded".to_string(),
+            ir_load_error: None,
             tx_cmd,
             rx_event,
         };
@@ -895,6 +919,8 @@ impl eframe::App for StandaloneApp {
             .map(|g| *g)
             .unwrap_or(CabinetState {
                 mic_pos: 0.5, mic_dist: 0.0, cab_dim: CabinetDimension::OneByTwelve,
+                                                            use_custom_ir: false,
+                                                            cabinet_master_volume: 1.0,
                 preamp_input_vol: 0.5, preamp_gain: 0.0,
                 preamp_bass: 0.0, preamp_mid: 0.0, preamp_treble: 0.0, preamp_master: 0.7,
                 preamp_channel: PreampChannel::Clean,
@@ -914,6 +940,8 @@ impl eframe::App for StandaloneApp {
         let mut ui_pos        = snap_ui.mic_pos;
         let mut ui_dist       = snap_ui.mic_dist;
         let mut ui_dim        = snap_ui.cab_dim;
+        let mut ui_custom_ir  = snap_ui.use_custom_ir;
+        let mut ui_master_vol = snap_ui.cabinet_master_volume;
 
         render_shared_panels(
             ctx,
@@ -978,26 +1006,116 @@ impl eframe::App for StandaloneApp {
             },
             // --- Cabinet closure ---
             |ui| {
-                let mut changed = false;
-                ui.label("Mic Position:");
-                if ui.add(egui::Slider::new(&mut ui_pos, 0.0..=1.0)).changed() { changed = true; }
-                ui.label("Mic Distance:");
-                if ui.add(egui::Slider::new(&mut ui_dist, 0.0..=1.0)).changed() { changed = true; }
-                ui.label("Cabinet Size:");
-                egui::ComboBox::from_id_salt("sa_cab_selector")
-                    .selected_text(CabinetDimension::variants()[ui_dim.to_index()])
-                    .show_ui(ui, |ui| {
-                        for (i, &name) in CabinetDimension::variants().iter().enumerate() {
-                            if ui.selectable_value(&mut ui_dim, CabinetDimension::from_index(i), name).changed() { changed = true; }
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        let mut changed = false;
+                        if ui.checkbox(&mut ui_custom_ir, "Use Custom IR").changed() { changed = true; }
+
+                        if ui_custom_ir {
+                            if ui.button("📁 Load IR").clicked() {
+                                if let Some(path) = rfd::FileDialog::new().add_filter("wav", &["wav"]).pick_file() {
+                                    match hound::WavReader::open(&path) {
+                                        Ok(mut reader) => {
+                                            let spec = reader.spec();
+                                            if spec.sample_format == hound::SampleFormat::Int || spec.sample_format == hound::SampleFormat::Float {
+                                                let mut samples: Vec<f32> = match spec.sample_format {
+                                                    hound::SampleFormat::Int => {
+                                                        if spec.bits_per_sample == 16 {
+                                                            reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32).collect()
+                                                        } else if spec.bits_per_sample == 24 {
+                                                            reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / 8388607.0).collect()
+                                                        } else {
+                                                            reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / i32::MAX as f32).collect()
+                                                        }
+                                                    },
+                                                    hound::SampleFormat::Float => {
+                                                        reader.samples::<f32>().filter_map(|s| s.ok()).collect()
+                                                    }
+                                                };
+                                                
+                                                let channels = spec.channels as usize;
+                                                if channels > 1 && !samples.is_empty() {
+                                                    samples = samples.chunks(channels).map(|c| c[0]).collect();
+                                                }
+                                                
+                                                if !samples.is_empty() {
+                                                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                                                    let ds = distortion::core::dsp::cabinet::ir_convolver::IrData::new(&samples, name.clone());
+                                                    self.custom_ir.store(Some(Arc::new(ds)));
+                                                    self.loaded_ir_name = name;
+                                                    self.ir_load_error = None;
+                                                }
+                                            } else {
+                                                self.ir_load_error = Some("Unsupported WAV format".to_string());
+                                            }
+                                        },
+                                        Err(e) => {
+                                            self.ir_load_error = Some(format!("Error: {}", e));
+                                        }
+                                    }
+                                }
+                            }
+                            ui.label(format!("Loaded: {}", self.loaded_ir_name));
+                            if let Some(err) = &self.ir_load_error {
+                                ui.colored_label(egui::Color32::RED, err);
+                            }
+                        }
+                        
+                        if changed {
+                            if let Ok(mut st) = self.cabinet_state.lock() { st.use_custom_ir = ui_custom_ir; }
                         }
                     });
-                if changed {
-                    if let Ok(mut st) = self.cabinet_state.lock() {
-                        st.mic_pos  = ui_pos;
-                        st.mic_dist = ui_dist;
-                        st.cab_dim  = ui_dim;
+
+                    ui.separator();
+                    
+                    let mut cab_changed = false;
+                    ui.horizontal(|ui| {
+                        if !ui_custom_ir {
+                            ui.label("Mic Position:");
+                            if ui.add(egui::Slider::new(&mut ui_pos, 0.0..=1.0)).changed() { cab_changed = true; }
+                            ui.label("Mic Distance:");
+                            if ui.add(egui::Slider::new(&mut ui_dist, 0.0..=1.0)).changed() { cab_changed = true; }
+                            ui.label("Size:");
+                            egui::ComboBox::from_id_salt("sa_cab_selector")
+                                .selected_text(distortion::core::state::plugin_params::CabinetDimension::variants()[ui_dim.to_index()])
+                                .show_ui(ui, |ui| {
+                                    for (i, &name) in distortion::core::state::plugin_params::CabinetDimension::variants().iter().enumerate() {
+                                        if ui.selectable_value(&mut ui_dim, distortion::core::state::plugin_params::CabinetDimension::from_index(i), name).changed() { cab_changed = true; }
+                                    }
+                                });
+                        } else {
+                            ui.label("Algorithmic cabinet bypassed.");
+                        }
+
+                        ui.separator();
+                        ui.label("Master Vol:");
+                        if ui.add(egui::Slider::new(&mut ui_master_vol, 0.0..=2.0)).changed() { cab_changed = true; }
+
+                        // Peak meter
+                        let current_peak = self.cab_clipping_meter.load(std::sync::atomic::Ordering::Relaxed);
+                        self.cab_clipping_meter.store(current_peak * 0.90, std::sync::atomic::Ordering::Relaxed);
+                        let peak_db: f32 = if current_peak > 1e-4 { 20.0 * current_peak.log10() } else { -60.0 };
+                        let fraction = (peak_db.max(-60.0_f32) / 60.0 + 1.0).clamp(0.0_f32, 1.0_f32);
+                        let meter_width = 80.0;
+                        let rect = ui.allocate_exact_size(egui::vec2(meter_width, 10.0), egui::Sense::hover()).0;
+                        let filled_rect = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + (meter_width * fraction), rect.max.y));
+                        let meter_color = if current_peak > 0.99 { egui::Color32::RED } else { egui::Color32::from_rgb(0, 200, 50) };
+                        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(40, 40, 40));
+                        ui.painter().rect_filled(filled_rect, 0.0, meter_color);
+                        if current_peak > 0.99 {
+                            ui.colored_label(egui::Color32::RED, "CLIP");
+                        }
+                    });
+
+                    if cab_changed {
+                        if let Ok(mut st) = self.cabinet_state.lock() {
+                            st.mic_pos  = ui_pos;
+                            st.mic_dist = ui_dist;
+                            st.cab_dim  = ui_dim;
+                            st.cabinet_master_volume = ui_master_vol;
+                        }
                     }
-                }
+                });
             },
         );
     }

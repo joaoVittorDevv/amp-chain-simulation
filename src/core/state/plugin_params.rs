@@ -88,6 +88,12 @@ pub struct BaseIOParams {
 
     #[id = "cabinet_dimension"]
     pub cabinet_dimension: EnumParam<CabinetDimension>,
+
+    #[id = "use_custom_ir"]
+    pub use_custom_ir: BoolParam,
+
+    #[id = "cabinet_master_volume"]
+    pub cabinet_master_volume: FloatParam,
 }
 
 pub struct EditorState {
@@ -95,6 +101,10 @@ pub struct EditorState {
     pub analyzer: dsp::AnalyzerDsp,
     pub consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     pub active_panel: crate::core::ui::ActivePanel,
+    pub custom_ir: Arc<arc_swap::ArcSwapOption<crate::core::dsp::cabinet::ir_convolver::IrData>>,
+    pub cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
+    pub loaded_ir_name: String,
+    pub ir_load_error: Option<String>,
 }
 
 impl Default for BaseIOParams {
@@ -188,6 +198,15 @@ impl Default for BaseIOParams {
         .with_smoother(SmoothingStyle::Linear(50.0)),
 
         cabinet_dimension: EnumParam::new("Cabinet", CabinetDimension::OneByTwelve),
+
+        use_custom_ir: BoolParam::new("Use Custom IR", false),
+
+        cabinet_master_volume: FloatParam::new(
+            "Master Volume",
+            1.0,
+            FloatRange::Linear { min: 0.0, max: 2.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(20.0)),
         }
     }
 }

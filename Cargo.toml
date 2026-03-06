@@ -18,6 +18,7 @@ name = "standalone"
 path = "src/bin/standalone.rs"
 
 [dependencies]
+arc-swap = "1.7.1"
 biquad = "0.5.0"
 cpal = "0.15.2"
 eframe = "0.31.0"
@@ -28,6 +29,7 @@ nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["a
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 num-complex = "0.4.6"
 realfft = "3.5.0"
+rfd = "0.14.1"
 rtrb = "0.3.3"
 rubato = "1.0.1"
 
