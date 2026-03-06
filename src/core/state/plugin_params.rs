@@ -15,6 +15,22 @@ pub enum InputSelect {
 }
 
 #[derive(Enum, PartialEq, Clone, Copy, Debug)]
+pub enum PreampChannel {
+    #[name = "Clean"]
+    Clean,
+    #[name = "Dirty"]
+    Dirty,
+}
+
+#[derive(Enum, PartialEq, Clone, Copy, Debug)]
+pub enum PreampDriveMode {
+    #[name = "Moderate Drive"]
+    ModerateDrive,
+    #[name = "High Gain"]
+    HighGain,
+}
+
+#[derive(Enum, PartialEq, Clone, Copy, Debug)]
 pub enum CabinetDimension {
     #[name = "1x12"]
     OneByTwelve,
@@ -38,6 +54,32 @@ pub struct BaseIOParams {
     #[id = "bypass"]
     pub bypass: BoolParam,
 
+    // --- Preamp ---
+    #[id = "preamp_input_vol"]
+    pub preamp_input_vol: FloatParam,
+
+    #[id = "preamp_gain"]
+    pub preamp_gain: FloatParam,
+
+    #[id = "preamp_bass"]
+    pub preamp_bass: FloatParam,
+
+    #[id = "preamp_mid"]
+    pub preamp_mid: FloatParam,
+
+    #[id = "preamp_treble"]
+    pub preamp_treble: FloatParam,
+
+    #[id = "preamp_master"]
+    pub preamp_master: FloatParam,
+
+    #[id = "preamp_channel"]
+    pub preamp_channel: EnumParam<PreampChannel>,
+
+    #[id = "preamp_drive_mode"]
+    pub preamp_drive_mode: EnumParam<PreampDriveMode>,
+
+    // --- Cabinet ---
     #[id = "mic_position"]
     pub mic_position: FloatParam,
 
@@ -52,7 +94,7 @@ pub struct EditorState {
     pub params: Arc<BaseIOParams>,
     pub analyzer: dsp::AnalyzerDsp,
     pub consumer: Arc<Mutex<Option<Consumer<f32>>>>,
-    pub panel_open: bool,
+    pub active_panel: crate::core::ui::ActivePanel,
 }
 
 impl Default for BaseIOParams {
@@ -78,6 +120,59 @@ impl Default for BaseIOParams {
 
         bypass: BoolParam::new("Bypass", false),
 
+        // --- Preamp defaults ---
+        preamp_input_vol: FloatParam::new(
+            "Input Volume",
+            0.5,
+            FloatRange::Linear { min: 0.0, max: 1.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(20.0))
+        .with_unit(""),
+
+        preamp_gain: FloatParam::new(
+            "Drive",
+            0.0,
+            FloatRange::Linear { min: 0.0, max: 1.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(30.0))
+        .with_unit(""),
+
+        preamp_bass: FloatParam::new(
+            "Bass",
+            0.0,
+            FloatRange::Linear { min: -15.0, max: 15.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(50.0))
+        .with_unit(" dB"),
+
+        preamp_mid: FloatParam::new(
+            "Mid",
+            0.0,
+            FloatRange::Linear { min: -15.0, max: 15.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(50.0))
+        .with_unit(" dB"),
+
+        preamp_treble: FloatParam::new(
+            "Treble",
+            0.0,
+            FloatRange::Linear { min: -15.0, max: 15.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(50.0))
+        .with_unit(" dB"),
+
+        preamp_master: FloatParam::new(
+            "Master Volume",
+            0.7,
+            FloatRange::Linear { min: 0.0, max: 1.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(20.0))
+        .with_unit(""),
+
+        preamp_channel: EnumParam::new("Channel", PreampChannel::Clean),
+        preamp_drive_mode: EnumParam::new("Drive Mode", PreampDriveMode::ModerateDrive),
+
+        // --- Cabinet defaults ---
         mic_position: FloatParam::new(
             "Mic Position",
             0.5,
