@@ -54,6 +54,13 @@ pub struct BaseIOParams {
     #[id = "bypass"]
     pub bypass: BoolParam,
 
+    // --- Neural Amp ---
+    #[id = "neural_amp_volume"]
+    pub neural_amp_volume: FloatParam,
+
+    #[id = "neural_amp_active"]
+    pub neural_amp_active: BoolParam,
+
     // --- Preamp ---
     #[id = "preamp_input_vol"]
     pub preamp_input_vol: FloatParam,
@@ -76,6 +83,9 @@ pub struct BaseIOParams {
     #[id = "preamp_channel"]
     pub preamp_channel: EnumParam<PreampChannel>,
 
+    #[id = "preamp_active"]
+    pub preamp_active: BoolParam,
+
     #[id = "preamp_drive_mode"]
     pub preamp_drive_mode: EnumParam<PreampDriveMode>,
 
@@ -91,6 +101,9 @@ pub struct BaseIOParams {
 
     #[id = "use_custom_ir"]
     pub use_custom_ir: BoolParam,
+
+    #[id = "cabinet_active"]
+    pub cabinet_active: BoolParam,
 
     #[id = "cabinet_master_volume"]
     pub cabinet_master_volume: FloatParam,
@@ -129,6 +142,23 @@ impl Default for BaseIOParams {
         .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
         bypass: BoolParam::new("Bypass", false),
+
+        // --- Neural Amp defaults ---
+        neural_amp_volume: FloatParam::new(
+            "Neural Volume",
+            util::db_to_gain(0.0),
+            FloatRange::Skewed {
+                min: util::db_to_gain(-24.0),
+                max: util::db_to_gain(12.0),
+                factor: FloatRange::gain_skew_factor(-24.0, 12.0),
+            },
+        )
+        .with_smoother(SmoothingStyle::Logarithmic(50.0))
+        .with_unit(" dB")
+        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+        neural_amp_active: BoolParam::new("Neural Amp Active", true),
 
         // --- Preamp defaults ---
         preamp_input_vol: FloatParam::new(
@@ -180,6 +210,7 @@ impl Default for BaseIOParams {
         .with_unit(""),
 
         preamp_channel: EnumParam::new("Channel", PreampChannel::Clean),
+        preamp_active: BoolParam::new("Preamp Active", true),
         preamp_drive_mode: EnumParam::new("Drive Mode", PreampDriveMode::ModerateDrive),
 
         // --- Cabinet defaults ---
@@ -200,6 +231,7 @@ impl Default for BaseIOParams {
         cabinet_dimension: EnumParam::new("Cabinet", CabinetDimension::OneByTwelve),
 
         use_custom_ir: BoolParam::new("Use Custom IR", false),
+        cabinet_active: BoolParam::new("Cabinet Active", true),
 
         cabinet_master_volume: FloatParam::new(
             "Master Volume",

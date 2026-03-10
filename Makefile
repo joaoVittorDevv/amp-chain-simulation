@@ -1,5 +1,10 @@
 .PHONY: help init build run bundle clean
 
+# Configuração Automática do LibTorch (necessário para Neural Amp)
+export LIBTORCH ?= $(HOME)/libtorch/libtorch
+export LIBTORCH_BYPASS_VERSION_CHECK := 1
+export LD_LIBRARY_PATH := $(HOME)/libtorch/libtorch/lib:$(LD_LIBRARY_PATH)
+
 help:
 	@echo "🎵 Plugin Makefile - Comandos Disponíveis:"
 	@echo "  make init    - 🚀 Inicializa um novo plugin a partir do template BaseIO"

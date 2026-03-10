@@ -30,8 +30,10 @@ nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 num-complex = "0.4.6"
 realfft = "3.5.0"
 rfd = "0.14.1"
+ringbuf = "0.4.8"
 rtrb = "0.3.3"
 rubato = "1.0.1"
+tract-onnx = "0.22.1"
 
 [profile.release]
 lto = "thin"

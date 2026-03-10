@@ -26,6 +26,7 @@ pub struct BaseIO {
     preamp_r: dsp::PreampProcessor,
     cabinet_l: dsp::CabinetProcessor,
     cabinet_r: dsp::CabinetProcessor,
+    neural_amp: dsp::NeuralAmpProcessor,
     custom_ir: Arc<arc_swap::ArcSwapOption<crate::core::dsp::cabinet::ir_convolver::IrData>>,
     cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
 }
@@ -45,6 +46,7 @@ impl Default for BaseIO {
             preamp_r: dsp::PreampProcessor::new(44100.0),
             cabinet_l: dsp::CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone()),
             cabinet_r: dsp::CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone()),
+            neural_amp: dsp::NeuralAmpProcessor::new("src/models/modelo_amp.onnx", 4096),
             custom_ir,
             cab_clipping_meter,
         }
@@ -148,11 +150,40 @@ impl Plugin for BaseIO {
                 use crate::core::state::plugin_params::{CabinetDimension, PreampChannel, PreampDriveMode};
                 use nih_plug::params::enums::Enum;
 
+                let n_active = state.params.neural_amp_active.value();
+                let p_active = state.params.preamp_active.value();
+                let c_active = state.params.cabinet_active.value();
+                let g_bypass = state.params.bypass.value();
+
                 ui::render_shared_panels(
                     egui_ctx,
                     &mut state.active_panel,
                     &state.analyzer.spectrum,
                     dsp::FFT_SIZE,
+                    n_active,
+                    p_active,
+                    c_active,
+                    g_bypass,
+                    || {
+                        setter.begin_set_parameter(&state.params.neural_amp_active);
+                        setter.set_parameter(&state.params.neural_amp_active, !n_active);
+                        setter.end_set_parameter(&state.params.neural_amp_active);
+                    },
+                    || {
+                        setter.begin_set_parameter(&state.params.preamp_active);
+                        setter.set_parameter(&state.params.preamp_active, !p_active);
+                        setter.end_set_parameter(&state.params.preamp_active);
+                    },
+                    || {
+                        setter.begin_set_parameter(&state.params.cabinet_active);
+                        setter.set_parameter(&state.params.cabinet_active, !c_active);
+                        setter.end_set_parameter(&state.params.cabinet_active);
+                    },
+                    // --- Neural closure ---
+                    |ui| {
+                        ui.label("Model Output Vol:");
+                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_amp_volume, setter).with_width(120.0));
+                    },
                     // --- Preamp closure ---
                     |ui| {
                         ui.label("Input Vol:");
@@ -357,6 +388,17 @@ impl Plugin for BaseIO {
     ) -> ProcessStatus {
         let input_mode   = self.params.input_select.value();
         let bypass       = self.params.bypass.value();
+        
+        // --- Neural Amp params ---
+        let neural_vol    = self.params.neural_amp_volume.smoothed.next();
+        let neural_active = self.params.neural_amp_active.value();
+        
+        // Notificar latência ao host se o bloco estiver pronto e ativo
+        if neural_active && self.neural_amp.is_ready() {
+            _context.set_latency_samples(self.neural_amp.latency());
+        } else {
+            _context.set_latency_samples(0);
+        }
 
         // Read smoothed preamp params once per block
         let input_vol    = self.params.preamp_input_vol.smoothed.next();
@@ -374,6 +416,8 @@ impl Plugin for BaseIO {
         let cab_dim  = self.params.cabinet_dimension.value();
         let use_custom_ir = self.params.use_custom_ir.value();
         let cab_master_vol = self.params.cabinet_master_volume.smoothed.next();
+        let preamp_active = self.params.preamp_active.value();
+        let cabinet_active = self.params.cabinet_active.value();
 
         // Block-level coefficient updates (not per-sample)
         self.preamp_l.update_params(bass_db, mid_db, treble_db);
@@ -397,13 +441,28 @@ impl Plugin for BaseIO {
                 l_out *= gain;
                 r_out *= gain;
 
+                // 0. Neural Amp (Mono process, dual output)
+                if neural_active && self.neural_amp.is_ready() {
+                    let mono_in = (l_out + r_out) * 0.5;
+                    self.neural_amp.push(mono_in);
+
+                    // Usar resultado processado ou passthrough enquanto o pipeline aquece
+                    let n_out = self.neural_amp.pop().unwrap_or(mono_in);
+                    l_out = n_out * neural_vol;
+                    r_out = n_out * neural_vol;
+                }
+
                 // 1. Preamp (BEFORE cabinet)
-                l_out = self.preamp_l.process(l_out, input_vol, preamp_gain, channel, drive_mode, master_vol);
-                r_out = self.preamp_r.process(r_out, input_vol, preamp_gain, channel, drive_mode, master_vol);
+                if preamp_active {
+                    l_out = self.preamp_l.process(l_out, input_vol, preamp_gain, channel, drive_mode, master_vol);
+                    r_out = self.preamp_r.process(r_out, input_vol, preamp_gain, channel, drive_mode, master_vol);
+                }
 
                 // 2. Cabinet (AFTER preamp)
-                l_out = self.cabinet_l.process(l_out);
-                r_out = self.cabinet_r.process(r_out);
+                if cabinet_active {
+                    l_out = self.cabinet_l.process(l_out);
+                    r_out = self.cabinet_r.process(r_out);
+                }
             } else {
                 l_out = l_in;
                 r_out = r_in;

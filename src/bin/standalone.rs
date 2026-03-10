@@ -5,7 +5,7 @@ use rtrb::{RingBuffer, Consumer};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use distortion::core::dsp::{AnalyzerDsp, CabinetProcessor, PreampProcessor, FFT_SIZE};
+use distortion::core::dsp::{AnalyzerDsp, CabinetProcessor, PreampProcessor, NeuralAmpProcessor, FFT_SIZE};
 use distortion::core::state::plugin_params::{CabinetDimension, PreampChannel, PreampDriveMode};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
 use nih_plug::params::enums::Enum;
@@ -30,6 +30,10 @@ struct CabinetState {
     preamp_master:     f32,
     preamp_channel:    PreampChannel,
     preamp_drive_mode: PreampDriveMode,
+    preamp_active:     bool,
+    cabinet_active:    bool,
+    neural_active:     bool,
+    neural_vol:        f32,
     // Global
     bypass: bool,
 }
@@ -214,6 +218,9 @@ fn audio_worker(
                 let mut preamp_r = PreampProcessor::new(sample_rate_for_cabinet);
                 preamp_l.initialize(192000.0);
                 preamp_r.initialize(192000.0);
+                
+                let mut neural_amp = NeuralAmpProcessor::new("src/models/modelo_amp.onnx", 4096);
+                
                 let cabinet_state_clone = cabinet_state.clone();
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
@@ -247,6 +254,10 @@ fn audio_worker(
                                                             preamp_master: 0.7,
                                                             preamp_channel: PreampChannel::Clean,
                                                             preamp_drive_mode: PreampDriveMode::ModerateDrive,
+                                                            preamp_active: true,
+                                                            cabinet_active: true,
+                                                            neural_active: true,
+                                                            neural_vol: 1.0,
                                                             bypass: false,
                                                         });
 
@@ -262,10 +273,24 @@ fn audio_worker(
                                                         let mut r = frame.get(r_idx).copied().unwrap_or(0.0);
 
                                                         if !snap.bypass {
-                                                            l = preamp_l.process(l, snap.preamp_input_vol, snap.preamp_gain, snap.preamp_channel, snap.preamp_drive_mode, snap.preamp_master);
-                                                            r = preamp_r.process(r, snap.preamp_input_vol, snap.preamp_gain, snap.preamp_channel, snap.preamp_drive_mode, snap.preamp_master);
-                                                            l = cabinet_l.process(l);
-                                                            r = cabinet_r.process(r);
+                                                            // 0. Neural Amp
+                                                            if snap.neural_active && neural_amp.is_ready() {
+                                                                let mono_in = (l + r) * 0.5;
+                                                                neural_amp.push(mono_in);
+                                                                // Usar resultado processado ou sinal seco enquanto o pipeline aquece
+                                                                let n_out = neural_amp.pop().unwrap_or(mono_in);
+                                                                l = n_out * snap.neural_vol;
+                                                                r = n_out * snap.neural_vol;
+                                                            }
+
+                                                            if snap.preamp_active {
+                                                                l = preamp_l.process(l, snap.preamp_input_vol, snap.preamp_gain, snap.preamp_channel, snap.preamp_drive_mode, snap.preamp_master);
+                                                                r = preamp_r.process(r, snap.preamp_input_vol, snap.preamp_gain, snap.preamp_channel, snap.preamp_drive_mode, snap.preamp_master);
+                                                            }
+                                                            if snap.cabinet_active {
+                                                                l = cabinet_l.process(l);
+                                                                r = cabinet_r.process(r);
+                                                            }
                                                             if l.is_nan() || l.is_infinite() { l = 0.0; }
                                                             if r.is_nan() || r.is_infinite() { r = 0.0; }
                                                         }
@@ -305,6 +330,10 @@ fn audio_worker(
                                                             preamp_master: 0.7,
                                                             preamp_channel: PreampChannel::Clean,
                                                             preamp_drive_mode: PreampDriveMode::ModerateDrive,
+                                                            preamp_active: true,
+                                                            cabinet_active: true,
+                                                            neural_active: true,
+                                                            neural_vol: 1.0,
                                                             bypass: false,
                                                         });
                                                     if !snap.bypass {
@@ -469,8 +498,8 @@ impl StandaloneApp {
             mic_pos: 0.5,
             mic_dist: 0.0,
             cab_dim: CabinetDimension::OneByTwelve,
-                                                            use_custom_ir: false,
-                                                            cabinet_master_volume: 1.0,
+            use_custom_ir: false,
+            cabinet_master_volume: 1.0,
             preamp_input_vol: 0.5,
             preamp_gain: 0.0,
             preamp_bass: 0.0,
@@ -479,6 +508,10 @@ impl StandaloneApp {
             preamp_master: 0.7,
             preamp_channel: PreampChannel::Clean,
             preamp_drive_mode: PreampDriveMode::ModerateDrive,
+            preamp_active: true,
+            cabinet_active: true,
+            neural_active: true,
+            neural_vol: 1.0,
             bypass: false,
         }));
 
@@ -925,6 +958,10 @@ impl eframe::App for StandaloneApp {
                 preamp_bass: 0.0, preamp_mid: 0.0, preamp_treble: 0.0, preamp_master: 0.7,
                 preamp_channel: PreampChannel::Clean,
                 preamp_drive_mode: PreampDriveMode::ModerateDrive,
+                preamp_active: true,
+                cabinet_active: true,
+                neural_active: true,
+                neural_vol: 1.0,
                 bypass: false,
             });
 
@@ -941,13 +978,44 @@ impl eframe::App for StandaloneApp {
         let mut ui_dist       = snap_ui.mic_dist;
         let mut ui_dim        = snap_ui.cab_dim;
         let mut ui_custom_ir  = snap_ui.use_custom_ir;
-        let mut ui_master_vol = snap_ui.cabinet_master_volume;
+        let mut ui_master_vol    = snap_ui.cabinet_master_volume;
+        let mut ui_neural_active = snap_ui.neural_active;
+        let mut ui_neural_vol    = snap_ui.neural_vol;
 
         render_shared_panels(
             ctx,
             &mut self.active_panel,
             &self.analyzer.spectrum,
             FFT_SIZE,
+            snap_ui.neural_active,
+            snap_ui.preamp_active,
+            snap_ui.cabinet_active,
+            snap_ui.bypass,
+            || {
+                if let Ok(mut st) = self.cabinet_state.lock() {
+                    st.neural_active = !snap_ui.neural_active;
+                }
+            },
+            || {
+                if let Ok(mut st) = self.cabinet_state.lock() {
+                    st.preamp_active = !snap_ui.preamp_active;
+                }
+            },
+            || {
+                if let Ok(mut st) = self.cabinet_state.lock() {
+                    st.cabinet_active = !snap_ui.cabinet_active;
+                }
+            },
+            |ui| {
+                let mut changed = false;
+                ui.label("Model Vol:");
+                if ui.add(egui::Slider::new(&mut ui_neural_vol, 0.0..=1.0)).changed() { changed = true; }
+                if changed {
+                    if let Ok(mut st) = self.cabinet_state.lock() {
+                        st.neural_vol = ui_neural_vol;
+                    }
+                }
+            },
             // --- Preamp closure ---
             |ui| {
                 let mut changed = false;
