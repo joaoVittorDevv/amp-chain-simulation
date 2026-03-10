@@ -277,8 +277,8 @@ fn audio_worker(
                                                             if snap.neural_active && neural_amp.is_ready() {
                                                                 let mono_in = (l + r) * 0.5;
                                                                 neural_amp.push(mono_in);
-                                                                // Usar resultado processado ou sinal seco enquanto o pipeline aquece
-                                                                let n_out = neural_amp.pop().unwrap_or(mono_in);
+                                                                // FALLBACK: Silêncio nominal para provar que a rede não está sendo bypassada
+                                                                let n_out = neural_amp.pop().unwrap_or(0.0);
                                                                 l = n_out * snap.neural_vol;
                                                                 r = n_out * snap.neural_vol;
                                                             }
@@ -541,9 +541,9 @@ impl StandaloneApp {
             output_left: 0,
             output_right: 1,
 
-            buffer_power: 8,       // 256 frames default
+            buffer_power: 11,      // 2048 frames default (Aumentado para estabilidade)
             buffer_range_min: 5,   // 32 minimum starting
-            buffer_range_max: 10,  // 1024 max starting
+            buffer_range_max: 13,  // 8192 max starting (Aumentado para estabilidade)
 
             sample_rate_warning: None,
             last_audio_error: None,

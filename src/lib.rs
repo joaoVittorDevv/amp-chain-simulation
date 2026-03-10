@@ -181,7 +181,13 @@ impl Plugin for BaseIO {
                     },
                     // --- Neural closure ---
                     |ui| {
-                        ui.label("Model Output Vol:");
+                        ui.label("Neural Drive:");
+                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_drive, setter).with_width(120.0));
+                        
+                        ui.label("Neural Makeup:");
+                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_output_gain, setter).with_width(120.0));
+
+                        ui.label("Master Output:");
                         ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_amp_volume, setter).with_width(120.0));
                     },
                     // --- Preamp closure ---
@@ -390,8 +396,10 @@ impl Plugin for BaseIO {
         let bypass       = self.params.bypass.value();
         
         // --- Neural Amp params ---
-        let neural_vol    = self.params.neural_amp_volume.smoothed.next();
-        let neural_active = self.params.neural_amp_active.value();
+        let neural_vol          = self.params.neural_amp_volume.smoothed.next();
+        let neural_drive        = self.params.neural_drive.smoothed.next();
+        let neural_output_gain  = self.params.neural_output_gain.smoothed.next();
+        let neural_active       = self.params.neural_amp_active.value();
         
         // Notificar latência ao host se o bloco estiver pronto e ativo
         if neural_active && self.neural_amp.is_ready() {
@@ -444,10 +452,37 @@ impl Plugin for BaseIO {
                 // 0. Neural Amp (Mono process, dual output)
                 if neural_active && self.neural_amp.is_ready() {
                     let mono_in = (l_out + r_out) * 0.5;
-                    self.neural_amp.push(mono_in);
 
-                    // Usar resultado processado ou passthrough enquanto o pipeline aquece
-                    let n_out = self.neural_amp.pop().unwrap_or(mono_in);
+                    // --- TELEMETRIA PONTO A (Drive aplicado, antes do push) ---
+                    let peak_a = (mono_in * neural_drive).abs();
+                    
+                    // Aplica Neural Drive ANTES de enviar para a thread de inferência
+                    self.neural_amp.push(mono_in * neural_drive);
+
+                    // Tenta ler o resultado da thread de inferência
+                    let (n_out, is_fallback) = if let Some(processed) = self.neural_amp.pop() {
+                        (processed * neural_output_gain, false)
+                    } else {
+                        // FALLBACK: Se a thread de inferência atrasar ou falhar,
+                        // aplicamos silêncio ZERO para provar que a integração está correta.
+                        (0.0, true) 
+                    };
+
+                    // --- TELEMETRIA PONTO B (Logo após o pop) ---
+                    let peak_b = n_out.abs();
+
+                    // Log de telemetria (a cada 20000 samples para não sobrecarregar)
+                    thread_local! {
+                        static SAMPLE_COUNT: std::cell::Cell<u64> = std::cell::Cell::new(0);
+                    }
+                    SAMPLE_COUNT.with(|count| {
+                        let c = count.get();
+                        if c % 22050 == 0 {
+                            println!("[TELEMETRIA] Ponto A (Drive): {:.5} | Ponto B (Output): {:.5} | Fallback: {}", peak_a, peak_b, is_fallback);
+                        }
+                        count.set(c + 1);
+                    });
+
                     l_out = n_out * neural_vol;
                     r_out = n_out * neural_vol;
                 }

@@ -58,6 +58,12 @@ pub struct BaseIOParams {
     #[id = "neural_amp_volume"]
     pub neural_amp_volume: FloatParam,
 
+    #[id = "neural_drive"]
+    pub neural_drive: FloatParam,
+
+    #[id = "neural_output_gain"]
+    pub neural_output_gain: FloatParam,
+
     #[id = "neural_amp_active"]
     pub neural_amp_active: BoolParam,
 
@@ -146,6 +152,34 @@ impl Default for BaseIOParams {
         // --- Neural Amp defaults ---
         neural_amp_volume: FloatParam::new(
             "Neural Volume",
+            util::db_to_gain(0.0),
+            FloatRange::Skewed {
+                min: util::db_to_gain(-24.0),
+                max: util::db_to_gain(12.0),
+                factor: FloatRange::gain_skew_factor(-24.0, 12.0),
+            },
+        )
+        .with_smoother(SmoothingStyle::Logarithmic(50.0))
+        .with_unit(" dB")
+        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+        neural_drive: FloatParam::new(
+            "Neural Drive",
+            util::db_to_gain(0.0),
+            FloatRange::Skewed {
+                min: util::db_to_gain(0.0),
+                max: util::db_to_gain(30.0),
+                factor: FloatRange::gain_skew_factor(0.0, 30.0),
+            },
+        )
+        .with_smoother(SmoothingStyle::Logarithmic(50.0))
+        .with_unit(" dB")
+        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+        neural_output_gain: FloatParam::new(
+            "Neural Makeup",
             util::db_to_gain(0.0),
             FloatRange::Skewed {
                 min: util::db_to_gain(-24.0),

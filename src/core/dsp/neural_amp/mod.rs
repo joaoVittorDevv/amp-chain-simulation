@@ -31,7 +31,7 @@ pub struct NeuralAmpProcessor {
 impl NeuralAmpProcessor {
     pub fn new(model_path: &str, latency: u32) -> Self {
         // Ring buffers grandes: permite acomodar latência de inferência e jitter da thread
-        const RB_CAP: usize = 65536;
+        const RB_CAP: usize = 131072;
 
         let (in_prod, mut in_cons) = HeapRb::<f32>::new(RB_CAP).split();
         let (mut out_prod, out_cons) = HeapRb::<f32>::new(RB_CAP).split();
@@ -55,11 +55,13 @@ impl NeuralAmpProcessor {
                 // Inicializar o NeuralSaturator (ONNX via Tract)
                 let mut saturator = NeuralSaturator::new(&model_path_str);
                 
-                // Tamanho de bloco fixo para eficiência de inferência
-                const BLOCK_SIZE: usize = 64;
+                // Tamanho de bloco fixo para eficiência de inferência (256 samples p/ throughput SIMD)
+                const BLOCK_SIZE: usize = 256;
                 let mut chunk_buffer: Vec<f32> = Vec::with_capacity(BLOCK_SIZE);
 
                 eprintln!("[NEURAL AMP] Thread de inferência iniciada com BLOCK_SIZE={}.", BLOCK_SIZE);
+
+                let mut first_block_processed = false;
 
                 while running_clone.load(Ordering::Relaxed) {
                     let available = in_cons.occupied_len();
@@ -75,16 +77,21 @@ impl NeuralAmpProcessor {
                         }
 
                         // Processar o bloco através da rede neural
-                        // O método process_block gerencia o histórico de 4096 internamente.
-                        let output = saturator.process_block(&chunk_buffer);
+                        // O método process_block gerencia o histórico de 4096 internamente (In-place)
+                        saturator.process_block(&mut chunk_buffer);
+
+                        if !first_block_processed {
+                            println!("[NEURAL AMP] Primeiro bloco processado com sucesso!");
+                            first_block_processed = true;
+                        }
 
                         // Enviar o resultado para o producer de saída
-                        for s in output {
+                        for &s in chunk_buffer.iter() {
                             let _ = out_prod.try_push(s);
                         }
                     } else {
                         // Sleep curto para evitar Busy Waiting se não houver samples suficientes
-                        thread::sleep(std::time::Duration::from_micros(250));
+                        thread::sleep(std::time::Duration::from_millis(1));
                     }
                 }
                 
