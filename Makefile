@@ -1,4 +1,7 @@
-.PHONY: help init build run bundle clean build-faust build-mojo pre-build
+.PHONY: help init build run bundle clean build-faust build-mojo pre-build check-env
+
+check-env:
+	@bash ./scripts/check_env.sh
 
 # Configuração Automática do LibTorch (necessário para Neural Amp)
 export LIBTORCH ?= $(HOME)/libtorch/libtorch
@@ -7,7 +10,7 @@ export LD_LIBRARY_PATH := $(HOME)/libtorch/libtorch/lib:$(LD_LIBRARY_PATH)
 
 # Configuração do Mojo
 export MOJO_HOME ?= $(HOME)/.modular/pkg/packages.modular.com_mojo
-export LD_LIBRARY_PATH := $(MOJO_HOME)/lib:$(LD_LIBRARY_PATH)
+export LD_LIBRARY_PATH := $(MOJO_HOME)/lib:$(PWD)/neural:$(LD_LIBRARY_PATH)
 
 help:
 	@echo "🎵 Plugin Makefile - Comandos Disponíveis:"
@@ -42,9 +45,13 @@ build-faust:
 build-mojo:
 	@echo "🔨 Compilando arquivos Mojo..."
 	@mkdir -p neural
-	@if command -v mojo >/dev/null 2>&1; then \
+	@if command -v mojo >/dev/null 2>&1 || [ -f ./.venv/bin/mojo ]; then \
 		if [ -f neural/main.mojo ]; then \
-			mojo build --shared neural/main.mojo -o neural/libneural.so; \
+			if [ -f ./.venv/bin/mojo ]; then \
+				./.venv/bin/mojo build --emit shared-lib neural/main.mojo -o neural/libneural.so; \
+			else \
+				mojo build --emit shared-lib neural/main.mojo -o neural/libneural.so; \
+			fi \
 		else \
 			echo "⚠️ neural/main.mojo não encontrado. Pulando etapa Mojo."; \
 		fi \
@@ -52,7 +59,7 @@ build-mojo:
 		echo "⚠️ Compilador Mojo não encontrado. Pulando etapa Mojo."; \
 	fi
 
-pre-build: build-faust build-mojo
+pre-build: check-env build-faust build-mojo
 
 run: pre-build
 	./scripts/run_standalone.sh

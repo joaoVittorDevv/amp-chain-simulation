@@ -4,8 +4,11 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{Arc, Mutex};
 
 pub mod core;
+pub mod bridge;
+
 use crate::core::{dsp, ui};
 use crate::core::ui::ActivePanel;
+use crate::bridge::{ExternalProcessor, faust::FaustProcessor, mojo::MojoProcessor};
 
 // --- BASE CONFIG (TEMPLATE SCAFFOLDING) ---
 pub const APP_NAME: &str = "Distortion";
@@ -22,6 +25,9 @@ pub struct BaseIO {
     analyzer_consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     analyzer_producer: Producer<f32>,
     neural_amp: dsp::NeuralAmpProcessor,
+
+    faust: Option<FaustProcessor>,
+    mojo: Option<MojoProcessor>,
 }
 
 impl Default for BaseIO {
@@ -33,6 +39,8 @@ impl Default for BaseIO {
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
             neural_amp: dsp::NeuralAmpProcessor::new("src/models/modelo_amp.onnx", 4096),
+            faust: FaustProcessor::new(),
+            mojo: Some(MojoProcessor::new()),
         }
     }
 }
@@ -159,6 +167,13 @@ impl Plugin for BaseIO {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
+        let sample_rate = buffer_config.sample_rate;
+        if let Some(faust) = &mut self.faust {
+            faust.init(sample_rate);
+        }
+        if let Some(mojo) = &mut self.mojo {
+            mojo.init(sample_rate);
+        }
         true
     }
 
@@ -182,6 +197,26 @@ impl Plugin for BaseIO {
             _context.set_latency_samples(self.neural_amp.latency());
         } else {
             _context.set_latency_samples(0);
+        }
+
+        // Recuperar referências slice-based do buffer do nih-plug para FFI zero-copy!
+        let buffer_slices = buffer.as_slice();
+        let num_samples = buffer_slices[0].len();
+        
+        // 1. Processar com a abstração Faust FFI O(1) in-place
+        if let Some(faust) = &mut self.faust {
+            // Se o Faust for mono/stereo na interface abstrata, passamos os canais.
+            // Para simplicidade na trait atual de "1 canal", processamos cada canal L, R.
+            for channel in buffer_slices.iter_mut() {
+                faust.process_block(channel.as_mut_ptr(), num_samples);
+            }
+        }
+
+        // 2. Processar com a abstração Mojo FFI O(1) in-place
+        if let Some(mojo) = &mut self.mojo {
+            for channel in buffer_slices.iter_mut() {
+                mojo.process_block(channel.as_mut_ptr(), num_samples);
+            }
         }
 
         for mut channel_samples in buffer.iter_samples() {
