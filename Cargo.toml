@@ -43,3 +43,6 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = "none"
+
+[build-dependencies]
+cc = "1.0"
