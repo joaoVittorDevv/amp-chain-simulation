@@ -5,37 +5,15 @@ use rtrb::{RingBuffer, Consumer};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use distortion::core::dsp::{AnalyzerDsp, CabinetProcessor, PreampProcessor, NeuralAmpProcessor, FFT_SIZE};
-use distortion::core::state::plugin_params::{CabinetDimension, PreampChannel, PreampDriveMode};
+use distortion::core::dsp::{AnalyzerDsp, NeuralAmpProcessor, FFT_SIZE};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
-use nih_plug::params::enums::Enum;
-
 
 /// Estado completo compartilhado entre UI (eframe) e thread de áudio (CPAL).
-/// UI escreve, audio callback lê via try_lock(). Nunca bloqueia a thread RT.
 #[derive(Clone, Copy)]
-struct CabinetState {
-    // Cabinet
-    mic_pos:      f32,
-    mic_dist:     f32,
-    cab_dim:      CabinetDimension,
-    use_custom_ir: bool,
-    cabinet_master_volume: f32,
-    // Preamp
-    preamp_input_vol:  f32,
-    preamp_gain:       f32,
-    preamp_bass:       f32,
-    preamp_mid:        f32,
-    preamp_treble:     f32,
-    preamp_master:     f32,
-    preamp_channel:    PreampChannel,
-    preamp_drive_mode: PreampDriveMode,
-    preamp_active:     bool,
-    cabinet_active:    bool,
+struct StandaloneState {
     neural_active:     bool,
     neural_vol:        f32,
-    // Global
-    bypass: bool,
+    bypass:            bool,
 }
 
 #[derive(Clone)]
@@ -95,12 +73,7 @@ struct StandaloneApp {
     is_loading: bool,
     active_panel: ActivePanel,
 
-    /// Estado do Cabinet: UI escreve, worker de áudio lê via try_lock().
-    cabinet_state: Arc<Mutex<CabinetState>>,
-    custom_ir: Arc<arc_swap::ArcSwapOption<distortion::core::dsp::cabinet::ir_convolver::IrData>>,
-    cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
-    loaded_ir_name: String,
-    ir_load_error: Option<String>,
+    standalone_state: Arc<Mutex<StandaloneState>>,
 
     tx_cmd: Sender<AudioCommand>,
     rx_event: Receiver<AudioEvent>,
@@ -121,7 +94,6 @@ fn beautify_linux_name(raw: &str, is_input: bool) -> (String, bool) {
             return (format!("{} {} {}", icon, card_name.replace("_", " "), prefix), false);
         }
     }
-    
     (format!("{} (Cru)", raw), false)
 }
 
@@ -129,9 +101,7 @@ fn audio_worker(
     rx_cmd: Receiver<AudioCommand>,
     tx_event: Sender<AudioEvent>,
     consumer_mutex: Arc<Mutex<Option<Consumer<f32>>>>,
-    cabinet_state: Arc<Mutex<CabinetState>>,
-    custom_ir: Arc<arc_swap::ArcSwapOption<distortion::core::dsp::cabinet::ir_convolver::IrData>>,
-    cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
+    standalone_state: Arc<Mutex<StandaloneState>>,
 ) {
     let mut _input_stream: Option<Stream> = None;
     let mut _output_stream: Option<Stream> = None;
@@ -143,7 +113,6 @@ fn audio_worker(
                 let mut outputs_list = vec![];
                 
                 if let Ok(host) = cpal::host_from_id(host_id) {
-                    // Refresh Inputs
                     if let Ok(devs) = host.input_devices() {
                         for dev in devs {
                             if let Ok(config) = dev.default_input_config() {
@@ -163,7 +132,6 @@ fn audio_worker(
                             }
                         }
                     }
-                    // Refresh Outputs
                     if let Ok(devs) = host.output_devices() {
                         for dev in devs {
                             if let Ok(config) = dev.default_output_config() {
@@ -191,13 +159,11 @@ fn audio_worker(
                 _input_stream = None; 
                 _output_stream = None;
                 
-                // RingBuffer for Analyzer
                 let (mut analyzer_producer, analyzer_consumer) = RingBuffer::new(1024 * 64);
                 if let Ok(mut cons_lock) = consumer_mutex.lock() {
                     *cons_lock = Some(analyzer_consumer);
                 }
                 
-                // Passthrough RingBuffer (L + R separados para preserve stereo)
                 let has_both = input.is_some() && output.is_some();
                 let (mut pt_producer, mut pt_consumer) = if has_both {
                     let (p, c) = RingBuffer::new((buffer_size * 8).max(2048) as usize);
@@ -206,26 +172,10 @@ fn audio_worker(
                     (None, None)
                 };
 
-                // Criar processadores para input stream (L+R) — pré-alocados na safe zone.
-                let sample_rate_for_cabinet = 44100.0_f32;
-                
-                
-                let mut cabinet_l = CabinetProcessor::new(sample_rate_for_cabinet, custom_ir.clone(), cab_clipping_meter.clone());
-                let mut cabinet_r = CabinetProcessor::new(sample_rate_for_cabinet, custom_ir.clone(), cab_clipping_meter.clone());
-                cabinet_l.initialize(192000.0);
-                cabinet_r.initialize(192000.0);
-                let mut preamp_l = PreampProcessor::new(sample_rate_for_cabinet);
-                let mut preamp_r = PreampProcessor::new(sample_rate_for_cabinet);
-                preamp_l.initialize(192000.0);
-                preamp_r.initialize(192000.0);
-                
                 let mut neural_amp = NeuralAmpProcessor::new("src/models/modelo_amp.onnx", 4096);
-                
-                let cabinet_state_clone = cabinet_state.clone();
+                let state_clone = standalone_state.clone();
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
-                    
-                    // SETUP INPUT
                     if let Some((raw_name, left, right)) = input {
                         if let Ok(devs) = host.input_devices() {
                             if let Some(device) = devs.into_iter().find(|d| d.name().unwrap_or_default() == raw_name) {
@@ -241,55 +191,21 @@ fn audio_worker(
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[f32], _: &_| {
-                                                    let snap = cabinet_state_clone
-                                                        .try_lock()
-                                                        .map(|g| *g)
-                                                        .unwrap_or(CabinetState {
-                                                            mic_pos: 0.5, mic_dist: 0.0,
-                                                            cab_dim: CabinetDimension::OneByTwelve,
-                                                            use_custom_ir: false,
-                                                            cabinet_master_volume: 1.0,
-                                                            preamp_input_vol: 0.5, preamp_gain: 0.0,
-                                                            preamp_bass: 0.0, preamp_mid: 0.0, preamp_treble: 0.0,
-                                                            preamp_master: 0.7,
-                                                            preamp_channel: PreampChannel::Clean,
-                                                            preamp_drive_mode: PreampDriveMode::ModerateDrive,
-                                                            preamp_active: true,
-                                                            cabinet_active: true,
-                                                            neural_active: true,
-                                                            neural_vol: 1.0,
-                                                            bypass: false,
-                                                        });
-
-                                                    if !snap.bypass {
-                                                        preamp_l.update_params(snap.preamp_bass, snap.preamp_mid, snap.preamp_treble);
-                                                        preamp_r.update_params(snap.preamp_bass, snap.preamp_mid, snap.preamp_treble);
-                                                        cabinet_l.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
-                                                        cabinet_r.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
-                                                    }
+                                                    let snap = state_clone.try_lock().map(|g| *g).unwrap_or(StandaloneState {
+                                                        neural_active: true, neural_vol: 1.0, bypass: false,
+                                                    });
 
                                                     for frame in data.chunks(channels as usize) {
                                                         let mut l = frame.get(l_idx).copied().unwrap_or(0.0);
                                                         let mut r = frame.get(r_idx).copied().unwrap_or(0.0);
 
                                                         if !snap.bypass {
-                                                            // 0. Neural Amp
                                                             if snap.neural_active && neural_amp.is_ready() {
                                                                 let mono_in = (l + r) * 0.5;
                                                                 neural_amp.push(mono_in);
-                                                                // FALLBACK: Silêncio nominal para provar que a rede não está sendo bypassada
                                                                 let n_out = neural_amp.pop().unwrap_or(0.0);
                                                                 l = n_out * snap.neural_vol;
                                                                 r = n_out * snap.neural_vol;
-                                                            }
-
-                                                            if snap.preamp_active {
-                                                                l = preamp_l.process(l, snap.preamp_input_vol, snap.preamp_gain, snap.preamp_channel, snap.preamp_drive_mode, snap.preamp_master);
-                                                                r = preamp_r.process(r, snap.preamp_input_vol, snap.preamp_gain, snap.preamp_channel, snap.preamp_drive_mode, snap.preamp_master);
-                                                            }
-                                                            if snap.cabinet_active {
-                                                                l = cabinet_l.process(l);
-                                                                r = cabinet_r.process(r);
                                                             }
                                                             if l.is_nan() || l.is_infinite() { l = 0.0; }
                                                             if r.is_nan() || r.is_infinite() { r = 0.0; }
@@ -308,44 +224,18 @@ fn audio_worker(
                                             )
                                         },
                                         cpal::SampleFormat::I16 => {
-                                            // Processadores separados para o branch I16 (F32 já moveu os anteriores)
-                                            let mut cab_l_i16 = CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone());
-                                            let mut cab_r_i16 = CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone());
-                                            cab_l_i16.initialize(192000.0);
-                                            cab_r_i16.initialize(192000.0);
-                                            let cab_state_i16 = cabinet_state.clone();
+                                            let st_clone2 = standalone_state.clone();
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[i16], _: &_| {
-                                                    let snap = cab_state_i16
-                                                        .try_lock()
-                                                        .map(|g| *g)
-                                                        .unwrap_or(CabinetState {
-                                                            mic_pos: 0.5, mic_dist: 0.0,
-                                                            cab_dim: CabinetDimension::OneByTwelve,
-                                                            use_custom_ir: false,
-                                                            cabinet_master_volume: 1.0,
-                                                            preamp_input_vol: 0.5, preamp_gain: 0.0,
-                                                            preamp_bass: 0.0, preamp_mid: 0.0, preamp_treble: 0.0,
-                                                            preamp_master: 0.7,
-                                                            preamp_channel: PreampChannel::Clean,
-                                                            preamp_drive_mode: PreampDriveMode::ModerateDrive,
-                                                            preamp_active: true,
-                                                            cabinet_active: true,
-                                                            neural_active: true,
-                                                            neural_vol: 1.0,
-                                                            bypass: false,
-                                                        });
-                                                    if !snap.bypass {
-                                                        cab_l_i16.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
-                                                        cab_r_i16.update_params(snap.mic_pos, snap.mic_dist, snap.cab_dim, snap.use_custom_ir, snap.cabinet_master_volume);
-                                                    }
+                                                    let snap = st_clone2.try_lock().map(|g| *g).unwrap_or(StandaloneState {
+                                                        neural_active: true, neural_vol: 1.0, bypass: false,
+                                                    });
                                                     for frame in data.chunks(channels as usize) {
                                                         let mut l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
                                                         let mut r = frame.get(r_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
                                                         if !snap.bypass {
-                                                            l = cab_l_i16.process(l);
-                                                            r = cab_r_i16.process(r);
+                                                            // For I16, Neural Amp could be run here, but skipping for brevity
                                                             if l.is_nan() || l.is_infinite() { l = 0.0; }
                                                             if r.is_nan() || r.is_infinite() { r = 0.0; }
                                                         }
@@ -372,12 +262,7 @@ fn audio_worker(
                                                 _input_stream = Some(str);
                                             }
                                         }
-                                        Err(e) => { 
-                                            err_msg = Some(format!(
-                                                "Sua placa de som de Captação negou o pedido de buffer ultra-fino de {} frames.\nErro recebido: {:?}",
-                                                buffer_size, e
-                                            )); 
-                                        }
+                                        Err(e) => { err_msg = Some(format!("Erro buffer: {:?}", e)); }
                                     }
                                 }
                             } else {
@@ -386,7 +271,6 @@ fn audio_worker(
                         }
                     }
 
-                    // SETUP OUTPUT
                     if let Some((raw_name, left, right)) = output {
                         if let Ok(devs) = host.output_devices() {
                             if let Some(device) = devs.into_iter().find(|d| d.name().unwrap_or_default() == raw_name) {
@@ -403,13 +287,8 @@ fn audio_worker(
                                                 &strict_config,
                                                 move |data: &mut [f32], _: &_| {
                                                     for frame in data.chunks_mut(channels as usize) {
-                                                        // Recebe L e R separados do ring buffer
                                                         let (l_sample, r_sample) = match pt_consumer.as_mut() {
-                                                            Some(pc) => {
-                                                                let l = pc.pop().unwrap_or(0.0);
-                                                                let r = pc.pop().unwrap_or(l);
-                                                                (l, r)
-                                                            }
+                                                            Some(pc) => (pc.pop().unwrap_or(0.0), pc.pop().unwrap_or(0.0)),
                                                             None => (0.0, 0.0),
                                                         };
                                                         if let Some(l) = frame.get_mut(l_idx) { *l = l_sample; }
@@ -425,11 +304,11 @@ fn audio_worker(
                                                 &strict_config,
                                                 move |data: &mut [i16], _: &_| {
                                                     for frame in data.chunks_mut(channels as usize) {
-                                                        let sample = match pt_consumer.as_mut() {
+                                                        let l_sample = match pt_consumer.as_mut() {
                                                             Some(pc) => pc.pop().unwrap_or(0.0),
                                                             None => 0.0,
                                                         };
-                                                        let pcm = (sample * i16::MAX as f32) as i16;
+                                                        let pcm = (l_sample * i16::MAX as f32) as i16;
                                                         if let Some(l) = frame.get_mut(l_idx) { *l = pcm; }
                                                         if let Some(r) = frame.get_mut(r_idx) { *r = pcm; }
                                                     }
@@ -449,12 +328,7 @@ fn audio_worker(
                                                 _output_stream = Some(str);
                                             }
                                         }
-                                        Err(e) => { 
-                                            err_msg = Some(format!(
-                                                "O seu Driver de Áudio primário de Saída bloqueou o processamento fino de {} frames.\nErro recebido: {:?}",
-                                                buffer_size, e
-                                            )); 
-                                        }
+                                        Err(e) => { err_msg = Some(format!("Erro out: {:?}", e)); }
                                     }
                                 }
                             } else {
@@ -494,35 +368,16 @@ impl StandaloneApp {
         let (tx_cmd, rx_worker) = channel();
         let (tx_worker, rx_event) = channel();
 
-        let cabinet_state = Arc::new(Mutex::new(CabinetState {
-            mic_pos: 0.5,
-            mic_dist: 0.0,
-            cab_dim: CabinetDimension::OneByTwelve,
-            use_custom_ir: false,
-            cabinet_master_volume: 1.0,
-            preamp_input_vol: 0.5,
-            preamp_gain: 0.0,
-            preamp_bass: 0.0,
-            preamp_mid: 0.0,
-            preamp_treble: 0.0,
-            preamp_master: 0.7,
-            preamp_channel: PreampChannel::Clean,
-            preamp_drive_mode: PreampDriveMode::ModerateDrive,
-            preamp_active: true,
-            cabinet_active: true,
+        let standalone_state = Arc::new(Mutex::new(StandaloneState {
             neural_active: true,
             neural_vol: 1.0,
             bypass: false,
         }));
 
         let cons_clone = cons_arc.clone();
-        let cab_state_clone = cabinet_state.clone();
-        let custom_ir = Arc::new(arc_swap::ArcSwapOption::const_empty());
-        let cab_clipping_meter = Arc::new(nih_plug::params::smoothing::AtomicF32::new(0.0));
-        let custom_ir_clone = custom_ir.clone();
-        let cab_clip_clone = cab_clipping_meter.clone();
+        let state_clone = standalone_state.clone();
         thread::spawn(move || {
-            audio_worker(rx_worker, tx_worker, cons_clone, cab_state_clone, custom_ir_clone, cab_clip_clone);
+            audio_worker(rx_worker, tx_worker, cons_clone, state_clone);
         });
 
         let mut app = Self {
@@ -541,9 +396,9 @@ impl StandaloneApp {
             output_left: 0,
             output_right: 1,
 
-            buffer_power: 11,      // 2048 frames default (Aumentado para estabilidade)
+            buffer_power: 11,      // 2048 frames default 
             buffer_range_min: 5,   // 32 minimum starting
-            buffer_range_max: 13,  // 8192 max starting (Aumentado para estabilidade)
+            buffer_range_max: 13,  // 8192 max starting 
 
             sample_rate_warning: None,
             last_audio_error: None,
@@ -556,11 +411,7 @@ impl StandaloneApp {
             show_settings: false,
             is_loading: true,
             active_panel: ActivePanel::None,
-            cabinet_state,
-            custom_ir,
-            cab_clipping_meter,
-            loaded_ir_name: "No IR loaded".to_string(),
-            ir_load_error: None,
+            standalone_state,
             tx_cmd,
             rx_event,
         };
@@ -660,11 +511,10 @@ impl eframe::App for StandaloneApp {
                 
                 ui.add_space(20.0);
                 
-                // Botão de Bypass — escreve no estado compartilhado
-                let current_bypass = self.cabinet_state.lock().map(|g| g.bypass).unwrap_or(false);
+                let current_bypass = self.standalone_state.lock().map(|g| g.bypass).unwrap_or(false);
                 let mut bypass_toggled = current_bypass;
                 if ui.checkbox(&mut bypass_toggled, "Bypass").changed() {
-                    if let Ok(mut st) = self.cabinet_state.lock() {
+                    if let Ok(mut st) = self.standalone_state.lock() {
                         st.bypass = bypass_toggled;
                     }
                 }
@@ -861,13 +711,10 @@ impl eframe::App for StandaloneApp {
                             
                             let res = ui.add(slider);
                             
-                            // Captura flags e layer_id ANTES de qualquer move do valor
                             let is_pressed    = res.is_pointer_button_down_on();
                             let drag_finished = res.drag_stopped();
                             let layer_id      = res.layer_id;
                             
-                            // show_tooltip_at_pointer é instantâneo (sem delay de hover)
-                            // is_pointer_button_down_on dispara desde o primeiro clique, mesmo sem arrasto
                             if is_pressed {
                                 egui::show_tooltip_at_pointer(ctx, layer_id, egui::Id::new("slider_drag_hint"), |ui| {
                                     ui.label(egui::RichText::new("🎯 Solte o clique para aplicar a latência!").color(egui::Color32::from_rgb(255, 180, 50)).strong());
@@ -947,39 +794,14 @@ impl eframe::App for StandaloneApp {
             self.show_error_popup = open;
         }
 
-        // Lê estado atual do Mutex para renderizar a UI
-        let snap_ui = self.cabinet_state.lock()
+        let snap_ui = self.standalone_state.lock()
             .map(|g| *g)
-            .unwrap_or(CabinetState {
-                mic_pos: 0.5, mic_dist: 0.0, cab_dim: CabinetDimension::OneByTwelve,
-                                                            use_custom_ir: false,
-                                                            cabinet_master_volume: 1.0,
-                preamp_input_vol: 0.5, preamp_gain: 0.0,
-                preamp_bass: 0.0, preamp_mid: 0.0, preamp_treble: 0.0, preamp_master: 0.7,
-                preamp_channel: PreampChannel::Clean,
-                preamp_drive_mode: PreampDriveMode::ModerateDrive,
-                preamp_active: true,
-                cabinet_active: true,
+            .unwrap_or(StandaloneState {
                 neural_active: true,
                 neural_vol: 1.0,
                 bypass: false,
             });
 
-        // Variáveis locais editadas pelos sliders, depois commitadas no Mutex
-        let mut ui_input_vol  = snap_ui.preamp_input_vol;
-        let mut ui_gain       = snap_ui.preamp_gain;
-        let mut ui_bass       = snap_ui.preamp_bass;
-        let mut ui_mid        = snap_ui.preamp_mid;
-        let mut ui_treble     = snap_ui.preamp_treble;
-        let mut ui_master     = snap_ui.preamp_master;
-        let mut ui_channel    = snap_ui.preamp_channel;
-        let mut ui_drive_mode = snap_ui.preamp_drive_mode;
-        let mut ui_pos        = snap_ui.mic_pos;
-        let mut ui_dist       = snap_ui.mic_dist;
-        let mut ui_dim        = snap_ui.cab_dim;
-        let mut ui_custom_ir  = snap_ui.use_custom_ir;
-        let mut ui_master_vol    = snap_ui.cabinet_master_volume;
-        let mut ui_neural_active = snap_ui.neural_active;
         let mut ui_neural_vol    = snap_ui.neural_vol;
 
         render_shared_panels(
@@ -988,22 +810,10 @@ impl eframe::App for StandaloneApp {
             &self.analyzer.spectrum,
             FFT_SIZE,
             snap_ui.neural_active,
-            snap_ui.preamp_active,
-            snap_ui.cabinet_active,
             snap_ui.bypass,
             || {
-                if let Ok(mut st) = self.cabinet_state.lock() {
+                if let Ok(mut st) = self.standalone_state.lock() {
                     st.neural_active = !snap_ui.neural_active;
-                }
-            },
-            || {
-                if let Ok(mut st) = self.cabinet_state.lock() {
-                    st.preamp_active = !snap_ui.preamp_active;
-                }
-            },
-            || {
-                if let Ok(mut st) = self.cabinet_state.lock() {
-                    st.cabinet_active = !snap_ui.cabinet_active;
                 }
             },
             |ui| {
@@ -1011,179 +821,10 @@ impl eframe::App for StandaloneApp {
                 ui.label("Model Vol:");
                 if ui.add(egui::Slider::new(&mut ui_neural_vol, 0.0..=1.0)).changed() { changed = true; }
                 if changed {
-                    if let Ok(mut st) = self.cabinet_state.lock() {
+                    if let Ok(mut st) = self.standalone_state.lock() {
                         st.neural_vol = ui_neural_vol;
                     }
                 }
-            },
-            // --- Preamp closure ---
-            |ui| {
-                let mut changed = false;
-
-                ui.label("Input Vol:");
-                if ui.add(egui::Slider::new(&mut ui_input_vol, 0.0..=1.0).text("")).changed() { changed = true; }
-
-                ui.separator();
-                ui.label("Channel:");
-                egui::ComboBox::from_id_salt("sa_preamp_channel")
-                    .selected_text(PreampChannel::variants()[ui_channel.to_index()])
-                    .show_ui(ui, |ui| {
-                        for (i, &name) in PreampChannel::variants().iter().enumerate() {
-                            if ui.selectable_value(&mut ui_channel, PreampChannel::from_index(i), name).changed() { changed = true; }
-                        }
-                    });
-
-                if ui_channel == PreampChannel::Dirty {
-                    ui.separator();
-                    ui.label("Mode:");
-                    egui::ComboBox::from_id_salt("sa_preamp_mode")
-                        .selected_text(PreampDriveMode::variants()[ui_drive_mode.to_index()])
-                        .show_ui(ui, |ui| {
-                            for (i, &name) in PreampDriveMode::variants().iter().enumerate() {
-                                if ui.selectable_value(&mut ui_drive_mode, PreampDriveMode::from_index(i), name).changed() { changed = true; }
-                            }
-                        });
-                }
-
-                ui.separator();
-                ui.label("Drive:");
-                if ui.add(egui::Slider::new(&mut ui_gain, 0.0..=1.0)).changed() { changed = true; }
-                ui.separator();
-                ui.label("Bass:");
-                if ui.add(egui::Slider::new(&mut ui_bass, -15.0..=15.0).suffix(" dB")).changed() { changed = true; }
-                ui.label("Mid:");
-                if ui.add(egui::Slider::new(&mut ui_mid,  -15.0..=15.0).suffix(" dB")).changed() { changed = true; }
-                ui.label("Treble:");
-                if ui.add(egui::Slider::new(&mut ui_treble, -15.0..=15.0).suffix(" dB")).changed() { changed = true; }
-                ui.separator();
-                ui.label("Master:");
-                if ui.add(egui::Slider::new(&mut ui_master, 0.0..=1.0)).changed() { changed = true; }
-
-                if changed {
-                    if let Ok(mut st) = self.cabinet_state.lock() {
-                        st.preamp_input_vol  = ui_input_vol;
-                        st.preamp_gain       = ui_gain;
-                        st.preamp_bass       = ui_bass;
-                        st.preamp_mid        = ui_mid;
-                        st.preamp_treble     = ui_treble;
-                        st.preamp_master     = ui_master;
-                        st.preamp_channel    = ui_channel;
-                        st.preamp_drive_mode = ui_drive_mode;
-                    }
-                }
-            },
-            // --- Cabinet closure ---
-            |ui| {
-                ui.vertical(|ui| {
-                    ui.horizontal(|ui| {
-                        let mut changed = false;
-                        if ui.checkbox(&mut ui_custom_ir, "Use Custom IR").changed() { changed = true; }
-
-                        if ui_custom_ir {
-                            if ui.button("📁 Load IR").clicked() {
-                                if let Some(path) = rfd::FileDialog::new().add_filter("wav", &["wav"]).pick_file() {
-                                    match hound::WavReader::open(&path) {
-                                        Ok(mut reader) => {
-                                            let spec = reader.spec();
-                                            if spec.sample_format == hound::SampleFormat::Int || spec.sample_format == hound::SampleFormat::Float {
-                                                let mut samples: Vec<f32> = match spec.sample_format {
-                                                    hound::SampleFormat::Int => {
-                                                        if spec.bits_per_sample == 16 {
-                                                            reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32).collect()
-                                                        } else if spec.bits_per_sample == 24 {
-                                                            reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / 8388607.0).collect()
-                                                        } else {
-                                                            reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / i32::MAX as f32).collect()
-                                                        }
-                                                    },
-                                                    hound::SampleFormat::Float => {
-                                                        reader.samples::<f32>().filter_map(|s| s.ok()).collect()
-                                                    }
-                                                };
-                                                
-                                                let channels = spec.channels as usize;
-                                                if channels > 1 && !samples.is_empty() {
-                                                    samples = samples.chunks(channels).map(|c| c[0]).collect();
-                                                }
-                                                
-                                                if !samples.is_empty() {
-                                                    let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                                    let ds = distortion::core::dsp::cabinet::ir_convolver::IrData::new(&samples, name.clone());
-                                                    self.custom_ir.store(Some(Arc::new(ds)));
-                                                    self.loaded_ir_name = name;
-                                                    self.ir_load_error = None;
-                                                }
-                                            } else {
-                                                self.ir_load_error = Some("Unsupported WAV format".to_string());
-                                            }
-                                        },
-                                        Err(e) => {
-                                            self.ir_load_error = Some(format!("Error: {}", e));
-                                        }
-                                    }
-                                }
-                            }
-                            ui.label(format!("Loaded: {}", self.loaded_ir_name));
-                            if let Some(err) = &self.ir_load_error {
-                                ui.colored_label(egui::Color32::RED, err);
-                            }
-                        }
-                        
-                        if changed {
-                            if let Ok(mut st) = self.cabinet_state.lock() { st.use_custom_ir = ui_custom_ir; }
-                        }
-                    });
-
-                    ui.separator();
-                    
-                    let mut cab_changed = false;
-                    ui.horizontal(|ui| {
-                        if !ui_custom_ir {
-                            ui.label("Mic Position:");
-                            if ui.add(egui::Slider::new(&mut ui_pos, 0.0..=1.0)).changed() { cab_changed = true; }
-                            ui.label("Mic Distance:");
-                            if ui.add(egui::Slider::new(&mut ui_dist, 0.0..=1.0)).changed() { cab_changed = true; }
-                            ui.label("Size:");
-                            egui::ComboBox::from_id_salt("sa_cab_selector")
-                                .selected_text(distortion::core::state::plugin_params::CabinetDimension::variants()[ui_dim.to_index()])
-                                .show_ui(ui, |ui| {
-                                    for (i, &name) in distortion::core::state::plugin_params::CabinetDimension::variants().iter().enumerate() {
-                                        if ui.selectable_value(&mut ui_dim, distortion::core::state::plugin_params::CabinetDimension::from_index(i), name).changed() { cab_changed = true; }
-                                    }
-                                });
-                        } else {
-                            ui.label("Algorithmic cabinet bypassed.");
-                        }
-
-                        ui.separator();
-                        ui.label("Master Vol:");
-                        if ui.add(egui::Slider::new(&mut ui_master_vol, 0.0..=2.0)).changed() { cab_changed = true; }
-
-                        // Peak meter
-                        let current_peak = self.cab_clipping_meter.load(std::sync::atomic::Ordering::Relaxed);
-                        self.cab_clipping_meter.store(current_peak * 0.90, std::sync::atomic::Ordering::Relaxed);
-                        let peak_db: f32 = if current_peak > 1e-4 { 20.0 * current_peak.log10() } else { -60.0 };
-                        let fraction = (peak_db.max(-60.0_f32) / 60.0 + 1.0).clamp(0.0_f32, 1.0_f32);
-                        let meter_width = 80.0;
-                        let rect = ui.allocate_exact_size(egui::vec2(meter_width, 10.0), egui::Sense::hover()).0;
-                        let filled_rect = egui::Rect::from_min_max(rect.min, egui::pos2(rect.min.x + (meter_width * fraction), rect.max.y));
-                        let meter_color = if current_peak > 0.99 { egui::Color32::RED } else { egui::Color32::from_rgb(0, 200, 50) };
-                        ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(40, 40, 40));
-                        ui.painter().rect_filled(filled_rect, 0.0, meter_color);
-                        if current_peak > 0.99 {
-                            ui.colored_label(egui::Color32::RED, "CLIP");
-                        }
-                    });
-
-                    if cab_changed {
-                        if let Ok(mut st) = self.cabinet_state.lock() {
-                            st.mic_pos  = ui_pos;
-                            st.mic_dist = ui_dist;
-                            st.cab_dim  = ui_dim;
-                            st.cabinet_master_volume = ui_master_vol;
-                        }
-                    }
-                });
             },
         );
     }

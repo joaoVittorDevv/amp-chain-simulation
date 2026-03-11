@@ -17,38 +17,22 @@ pub const VST3_ID: [u8; 16] = [0xA9, 0xED, 0x13, 0x81, 0x0D, 0xBC, 0x4A, 0x4A, 0
 // ------------------------------------------
 use crate::core::state::plugin_params::{BaseIOParams, EditorState, InputSelect};
 
-
 pub struct BaseIO {
     params: Arc<BaseIOParams>,
     analyzer_consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     analyzer_producer: Producer<f32>,
-    preamp_l: dsp::PreampProcessor,
-    preamp_r: dsp::PreampProcessor,
-    cabinet_l: dsp::CabinetProcessor,
-    cabinet_r: dsp::CabinetProcessor,
     neural_amp: dsp::NeuralAmpProcessor,
-    custom_ir: Arc<arc_swap::ArcSwapOption<crate::core::dsp::cabinet::ir_convolver::IrData>>,
-    cab_clipping_meter: Arc<nih_plug::params::smoothing::AtomicF32>,
 }
 
 impl Default for BaseIO {
     fn default() -> Self {
         let (producer, consumer) = RingBuffer::new(1024 * 64);
         
-        let custom_ir = Arc::new(arc_swap::ArcSwapOption::const_empty());
-        let cab_clipping_meter = Arc::new(nih_plug::params::smoothing::AtomicF32::new(0.0));
-        
         Self {
             params: Arc::new(BaseIOParams::default()),
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
-            preamp_l: dsp::PreampProcessor::new(44100.0),
-            preamp_r: dsp::PreampProcessor::new(44100.0),
-            cabinet_l: dsp::CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone()),
-            cabinet_r: dsp::CabinetProcessor::new(44100.0, custom_ir.clone(), cab_clipping_meter.clone()),
             neural_amp: dsp::NeuralAmpProcessor::new("src/models/modelo_amp.onnx", 4096),
-            custom_ir,
-            cab_clipping_meter,
         }
     }
 }
@@ -89,24 +73,17 @@ impl Plugin for BaseIO {
                 analyzer: dsp::AnalyzerDsp::default(),
                 consumer: consumer_mutex,
                 active_panel: ActivePanel::None,
-                custom_ir: self.custom_ir.clone(),
-                cab_clipping_meter: self.cab_clipping_meter.clone(),
-                loaded_ir_name: "No IR loaded".to_string(),
-                ir_load_error: None,
             },
             |_, _| {},
             move |egui_ctx, setter, state| {
-                // 1. Dizer ao Egui para desenhar continuamente (~60 fps)
                 egui_ctx.request_repaint();
 
-                // 2 & 3. Processar áudio e desenhar
                 if let Ok(mut cons_lock) = state.consumer.try_lock() {
                     if let Some(cons) = cons_lock.as_mut() {
                         state.analyzer.process_consumer(cons);
                     }
                 }
 
-                // 4. Pintar a UI de Alta Performance
                 egui::TopBottomPanel::top("header_panel").show(egui_ctx, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(format!("{} Spectrum Analyzer", APP_NAME));
@@ -136,7 +113,6 @@ impl Plugin for BaseIO {
 
                         ui.separator();
 
-                        // Bypass Checkbox
                         let current_bypass = state.params.bypass.value();
                         let mut new_bypass = current_bypass;
                         if ui.checkbox(&mut new_bypass, "Bypass").changed() {
@@ -147,12 +123,7 @@ impl Plugin for BaseIO {
                     });
                 });
 
-                use crate::core::state::plugin_params::{CabinetDimension, PreampChannel, PreampDriveMode};
-                use nih_plug::params::enums::Enum;
-
                 let n_active = state.params.neural_amp_active.value();
-                let p_active = state.params.preamp_active.value();
-                let c_active = state.params.cabinet_active.value();
                 let g_bypass = state.params.bypass.value();
 
                 ui::render_shared_panels(
@@ -161,25 +132,12 @@ impl Plugin for BaseIO {
                     &state.analyzer.spectrum,
                     dsp::FFT_SIZE,
                     n_active,
-                    p_active,
-                    c_active,
                     g_bypass,
                     || {
                         setter.begin_set_parameter(&state.params.neural_amp_active);
                         setter.set_parameter(&state.params.neural_amp_active, !n_active);
                         setter.end_set_parameter(&state.params.neural_amp_active);
                     },
-                    || {
-                        setter.begin_set_parameter(&state.params.preamp_active);
-                        setter.set_parameter(&state.params.preamp_active, !p_active);
-                        setter.end_set_parameter(&state.params.preamp_active);
-                    },
-                    || {
-                        setter.begin_set_parameter(&state.params.cabinet_active);
-                        setter.set_parameter(&state.params.cabinet_active, !c_active);
-                        setter.end_set_parameter(&state.params.cabinet_active);
-                    },
-                    // --- Neural closure ---
                     |ui| {
                         ui.label("Neural Drive:");
                         ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_drive, setter).with_width(120.0));
@@ -189,181 +147,6 @@ impl Plugin for BaseIO {
 
                         ui.label("Master Output:");
                         ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_amp_volume, setter).with_width(120.0));
-                    },
-                    // --- Preamp closure ---
-                    |ui| {
-                        ui.label("Input Vol:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.preamp_input_vol, setter).with_width(80.0));
-                        ui.separator();
-
-                        ui.label("Channel:");
-                        let cur_ch = state.params.preamp_channel.value();
-                        let mut new_ch = cur_ch;
-                        egui::ComboBox::from_id_salt("preamp_channel")
-                            .selected_text(PreampChannel::variants()[cur_ch.to_index()])
-                            .show_ui(ui, |ui| {
-                                for (i, &name) in PreampChannel::variants().iter().enumerate() {
-                                    ui.selectable_value(&mut new_ch, PreampChannel::from_index(i), name);
-                                }
-                            });
-                        if new_ch != cur_ch {
-                            setter.begin_set_parameter(&state.params.preamp_channel);
-                            setter.set_parameter(&state.params.preamp_channel, new_ch);
-                            setter.end_set_parameter(&state.params.preamp_channel);
-                        }
-
-                        if new_ch == PreampChannel::Dirty {
-                            ui.separator();
-                            ui.label("Mode:");
-                            let cur_dm = state.params.preamp_drive_mode.value();
-                            let mut new_dm = cur_dm;
-                            egui::ComboBox::from_id_salt("preamp_drive_mode")
-                                .selected_text(PreampDriveMode::variants()[cur_dm.to_index()])
-                                .show_ui(ui, |ui| {
-                                    for (i, &name) in PreampDriveMode::variants().iter().enumerate() {
-                                        ui.selectable_value(&mut new_dm, PreampDriveMode::from_index(i), name);
-                                    }
-                                });
-                            if new_dm != cur_dm {
-                                setter.begin_set_parameter(&state.params.preamp_drive_mode);
-                                setter.set_parameter(&state.params.preamp_drive_mode, new_dm);
-                                setter.end_set_parameter(&state.params.preamp_drive_mode);
-                            }
-                        }
-
-                        ui.separator();
-                        ui.label("Drive:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.preamp_gain, setter).with_width(80.0));
-                        ui.separator();
-                        ui.label("Bass:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.preamp_bass, setter).with_width(80.0));
-                        ui.label("Mid:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.preamp_mid, setter).with_width(80.0));
-                        ui.label("Treble:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.preamp_treble, setter).with_width(80.0));
-                        ui.separator();
-                        ui.label("Master:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.preamp_master, setter).with_width(80.0));
-                    },
-                    // --- Cabinet closure ---
-                    |ui| {
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                let current_custom_ir = state.params.use_custom_ir.value();
-                                let mut new_custom_ir = current_custom_ir;
-                                if ui.checkbox(&mut new_custom_ir, "Use Custom IR").changed() {
-                                    setter.begin_set_parameter(&state.params.use_custom_ir);
-                                    setter.set_parameter(&state.params.use_custom_ir, new_custom_ir);
-                                    setter.end_set_parameter(&state.params.use_custom_ir);
-                                }
-
-                                if new_custom_ir {
-                                    if ui.button("📁 Load IR").clicked() {
-                                        if let Some(path) = rfd::FileDialog::new().add_filter("wav", &["wav"]).pick_file() {
-                                            match hound::WavReader::open(&path) {
-                                                Ok(mut reader) => {
-                                                    let spec = reader.spec();
-                                                    if spec.sample_format == hound::SampleFormat::Int || spec.sample_format == hound::SampleFormat::Float {
-                                                        let mut samples: Vec<f32> = match spec.sample_format {
-                                                            hound::SampleFormat::Int => {
-                                                                if spec.bits_per_sample == 16 {
-                                                                    reader.samples::<i16>().filter_map(|s| s.ok()).map(|s| s as f32 / i16::MAX as f32).collect()
-                                                                } else if spec.bits_per_sample == 24 {
-                                                                    reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / 8388607.0).collect()
-                                                                } else {
-                                                                    reader.samples::<i32>().filter_map(|s| s.ok()).map(|s| s as f32 / i32::MAX as f32).collect()
-                                                                }
-                                                            },
-                                                            hound::SampleFormat::Float => {
-                                                                reader.samples::<f32>().filter_map(|s| s.ok()).collect()
-                                                            }
-                                                        };
-                                                        
-                                                        let channels = spec.channels as usize;
-                                                        if channels > 1 && !samples.is_empty() {
-                                                            samples = samples.chunks(channels).map(|c| c[0]).collect();
-                                                        }
-                                                        
-                                                        if !samples.is_empty() {
-                                                            let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                                            let ds = crate::core::dsp::cabinet::ir_convolver::IrData::new(&samples, name.clone());
-                                                            state.custom_ir.store(Some(Arc::new(ds)));
-                                                            state.loaded_ir_name = name;
-                                                            state.ir_load_error = None;
-                                                        }
-                                                    } else {
-                                                        state.ir_load_error = Some("Unsupported WAV format".to_string());
-                                                    }
-                                                },
-                                                Err(e) => {
-                                                    state.ir_load_error = Some(format!("Error: {}", e));
-                                                }
-                                            }
-                                        }
-                                    }
-                                    
-                                    ui.label(format!("Loaded: {}", state.loaded_ir_name));
-                                    
-                                    if let Some(err) = &state.ir_load_error {
-                                        ui.colored_label(egui::Color32::RED, err);
-                                    }
-                                }
-                            });
-
-                            ui.separator();
-                            
-                            ui.horizontal(|ui| {
-                                if !state.params.use_custom_ir.value() {
-                                    ui.label("Mic Position:");
-                                    ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_position, setter).with_width(80.0));
-                                    ui.label("Mic Distance:");
-                                    ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.mic_distance, setter).with_width(80.0));
-
-                                    ui.label("Size:");
-                                    let current_cab = state.params.cabinet_dimension.value();
-                                    let mut new_cab = current_cab;
-                                    egui::ComboBox::from_id_salt("cab_selector")
-                                        .selected_text(CabinetDimension::variants()[current_cab.to_index()])
-                                        .show_ui(ui, |ui| {
-                                            for (i, &name) in CabinetDimension::variants().iter().enumerate() {
-                                                let variant = CabinetDimension::from_index(i);
-                                                ui.selectable_value(&mut new_cab, variant, name);
-                                            }
-                                        });
-                                    if new_cab != current_cab {
-                                        setter.begin_set_parameter(&state.params.cabinet_dimension);
-                                        setter.set_parameter(&state.params.cabinet_dimension, new_cab);
-                                        setter.end_set_parameter(&state.params.cabinet_dimension);
-                                    }
-                                } else {
-                                    ui.label("Algorithmic cabinet bypassed.");
-                                }
-                                
-                                ui.separator();
-                                ui.label("Master Vol:");
-                                ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.cabinet_master_volume, setter).with_width(80.0));
-                                
-                                // Peak meter logic
-                                let current_peak = state.cab_clipping_meter.load(std::sync::atomic::Ordering::Relaxed);
-                                // Decay meter visually so it does not stay frozen. Approximately 0.9 per frame is a fast decay.
-                                state.cab_clipping_meter.store(current_peak * 0.90, std::sync::atomic::Ordering::Relaxed);
-                                let peak_db: f32 = if current_peak > 1e-4 { 20.0 * current_peak.log10() } else { -60.0 };
-                                let fraction = (peak_db.max(-60.0_f32) / 60.0 + 1.0).clamp(0.0_f32, 1.0_f32);
-                                let meter_width = 60.0;
-                                let rect = ui.allocate_exact_size(egui::vec2(meter_width, 10.0), egui::Sense::hover()).0;
-                                let filled_rect = egui::Rect::from_min_max(
-                                    rect.min,
-                                    egui::pos2(rect.min.x + (meter_width * fraction), rect.max.y)
-                                );
-                                let meter_color = if current_peak > 0.99 { egui::Color32::RED } else { egui::Color32::from_rgb(0, 200, 50) };
-                                
-                                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(40, 40, 40));
-                                ui.painter().rect_filled(filled_rect, 0.0, meter_color);
-                                if current_peak > 0.99 {
-                                    ui.colored_label(egui::Color32::RED, "CLIP");
-                                }
-                            });
-                        });
                     },
                 );
             }
@@ -376,11 +159,6 @@ impl Plugin for BaseIO {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        let max_sr = buffer_config.sample_rate;
-        self.preamp_l.initialize(max_sr);
-        self.preamp_r.initialize(max_sr);
-        self.cabinet_l.initialize(max_sr);
-        self.cabinet_r.initialize(max_sr);
         true
     }
 
@@ -395,43 +173,16 @@ impl Plugin for BaseIO {
         let input_mode   = self.params.input_select.value();
         let bypass       = self.params.bypass.value();
         
-        // --- Neural Amp params ---
         let neural_vol          = self.params.neural_amp_volume.smoothed.next();
         let neural_drive        = self.params.neural_drive.smoothed.next();
         let neural_output_gain  = self.params.neural_output_gain.smoothed.next();
         let neural_active       = self.params.neural_amp_active.value();
         
-        // Notificar latência ao host se o bloco estiver pronto e ativo
         if neural_active && self.neural_amp.is_ready() {
             _context.set_latency_samples(self.neural_amp.latency());
         } else {
             _context.set_latency_samples(0);
         }
-
-        // Read smoothed preamp params once per block
-        let input_vol    = self.params.preamp_input_vol.smoothed.next();
-        let preamp_gain  = self.params.preamp_gain.smoothed.next();
-        let bass_db      = self.params.preamp_bass.smoothed.next();
-        let mid_db       = self.params.preamp_mid.smoothed.next();
-        let treble_db    = self.params.preamp_treble.smoothed.next();
-        let master_vol   = self.params.preamp_master.smoothed.next();
-        let channel      = self.params.preamp_channel.value();
-        let drive_mode   = self.params.preamp_drive_mode.value();
-
-        // Cabinet params
-        let mic_pos  = self.params.mic_position.smoothed.next();
-        let mic_dist = self.params.mic_distance.smoothed.next();
-        let cab_dim  = self.params.cabinet_dimension.value();
-        let use_custom_ir = self.params.use_custom_ir.value();
-        let cab_master_vol = self.params.cabinet_master_volume.smoothed.next();
-        let preamp_active = self.params.preamp_active.value();
-        let cabinet_active = self.params.cabinet_active.value();
-
-        // Block-level coefficient updates (not per-sample)
-        self.preamp_l.update_params(bass_db, mid_db, treble_db);
-        self.preamp_r.update_params(bass_db, mid_db, treble_db);
-        self.cabinet_l.update_params(mic_pos, mic_dist, cab_dim, use_custom_ir, cab_master_vol);
-        self.cabinet_r.update_params(mic_pos, mic_dist, cab_dim, use_custom_ir, cab_master_vol);
 
         for mut channel_samples in buffer.iter_samples() {
             let gain = self.params.gain.smoothed.next();
@@ -449,29 +200,21 @@ impl Plugin for BaseIO {
                 l_out *= gain;
                 r_out *= gain;
 
-                // 0. Neural Amp (Mono process, dual output)
                 if neural_active && self.neural_amp.is_ready() {
                     let mono_in = (l_out + r_out) * 0.5;
 
-                    // --- TELEMETRIA PONTO A (Drive aplicado, antes do push) ---
                     let peak_a = (mono_in * neural_drive).abs();
                     
-                    // Aplica Neural Drive ANTES de enviar para a thread de inferência
                     self.neural_amp.push(mono_in * neural_drive);
 
-                    // Tenta ler o resultado da thread de inferência
                     let (n_out, is_fallback) = if let Some(processed) = self.neural_amp.pop() {
                         (processed * neural_output_gain, false)
                     } else {
-                        // FALLBACK: Se a thread de inferência atrasar ou falhar,
-                        // aplicamos silêncio ZERO para provar que a integração está correta.
                         (0.0, true) 
                     };
 
-                    // --- TELEMETRIA PONTO B (Logo após o pop) ---
                     let peak_b = n_out.abs();
 
-                    // Log de telemetria (a cada 20000 samples para não sobrecarregar)
                     thread_local! {
                         static SAMPLE_COUNT: std::cell::Cell<u64> = std::cell::Cell::new(0);
                     }
@@ -487,17 +230,6 @@ impl Plugin for BaseIO {
                     r_out = n_out * neural_vol;
                 }
 
-                // 1. Preamp (BEFORE cabinet)
-                if preamp_active {
-                    l_out = self.preamp_l.process(l_out, input_vol, preamp_gain, channel, drive_mode, master_vol);
-                    r_out = self.preamp_r.process(r_out, input_vol, preamp_gain, channel, drive_mode, master_vol);
-                }
-
-                // 2. Cabinet (AFTER preamp)
-                if cabinet_active {
-                    l_out = self.cabinet_l.process(l_out);
-                    r_out = self.cabinet_r.process(r_out);
-                }
             } else {
                 l_out = l_in;
                 r_out = r_in;
@@ -509,7 +241,6 @@ impl Plugin for BaseIO {
             if let Some(l) = channel_samples.get_mut(0) { *l = l_out; }
             if let Some(r) = channel_samples.get_mut(1) { *r = r_out; }
 
-            // Tap analyzer AFTER full chain
             let visual_sample = (l_out + r_out) * 0.5;
             let _ = self.analyzer_producer.push(visual_sample);
         }

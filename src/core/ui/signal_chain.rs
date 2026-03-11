@@ -5,20 +5,14 @@ use nih_plug_egui::egui;
 pub enum ActivePanel {
     None,
     NeuralAmp,
-    Preamp,
-    Cabinet,
 }
 
 pub fn draw_signal_chain(
     ui: &mut egui::Ui,
     active_panel: &mut ActivePanel,
     neural_active: bool,
-    preamp_active: bool,
-    cabinet_active: bool,
     global_bypass: bool,
     mut on_neural_toggle: impl FnMut(),
-    mut on_preamp_toggle: impl FnMut(),
-    mut on_cabinet_toggle: impl FnMut(),
 ) {
     let (rect, _response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 60.0),
@@ -124,28 +118,7 @@ pub fn draw_signal_chain(
 
     // --- Node positions ---
     let total_span = end_x - start_x;
-    let neural_x = start_x + total_span * 0.30;
-    let preamp_x = start_x + total_span * 0.55;
-    let cabinet_x = start_x + total_span * 0.80;
-
-    // Draw arrow connectors
-    let arrow_y = line_y;
-    
-    // Neural -> Preamp
-    let arrow_mid1 = (neural_x + preamp_x) * 0.5;
-    painter.arrow(
-        egui::pos2(arrow_mid1 - 8.0, arrow_y),
-        egui::vec2(16.0, 0.0),
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 100, 110)),
-    );
-
-    // Preamp -> Cabinet
-    let arrow_mid2 = (preamp_x + cabinet_x) * 0.5;
-    painter.arrow(
-        egui::pos2(arrow_mid2 - 8.0, arrow_y),
-        egui::vec2(16.0, 0.0),
-        egui::Stroke::new(2.0, egui::Color32::from_rgb(100, 100, 110)),
-    );
+    let neural_x = start_x + total_span * 0.5;
 
     // Draw nodes
     let (neural_clicked, neural_power_clicked) = draw_node(
@@ -157,25 +130,6 @@ pub fn draw_signal_chain(
         *active_panel == ActivePanel::NeuralAmp,
         neural_active,
     );
-    let (preamp_clicked, preamp_power_clicked) = draw_node(
-        &painter,
-        ui,
-        preamp_x,
-        "PREAMP",
-        "preamp_node",
-        *active_panel == ActivePanel::Preamp,
-        preamp_active,
-    );
-    
-    let (cabinet_clicked, cabinet_power_clicked) = draw_node(
-        &painter,
-        ui,
-        cabinet_x,
-        "CABINET",
-        "cabinet_node",
-        *active_panel == ActivePanel::Cabinet,
-        cabinet_active,
-    );
 
     if neural_power_clicked {
         on_neural_toggle();
@@ -186,25 +140,4 @@ pub fn draw_signal_chain(
             ActivePanel::NeuralAmp
         };
     }
-
-    if preamp_power_clicked {
-        on_preamp_toggle();
-    } else if preamp_clicked {
-        *active_panel = if *active_panel == ActivePanel::Preamp {
-            ActivePanel::None
-        } else {
-            ActivePanel::Preamp
-        };
-    }
-    
-    if cabinet_power_clicked {
-        on_cabinet_toggle();
-    } else if cabinet_clicked {
-        *active_panel = if *active_panel == ActivePanel::Cabinet {
-            ActivePanel::None
-        } else {
-            ActivePanel::Cabinet
-        };
-    }
 }
-

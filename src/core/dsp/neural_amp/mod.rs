@@ -56,7 +56,7 @@ impl NeuralAmpProcessor {
                 let mut saturator = NeuralSaturator::new(&model_path_str);
                 
                 // Tamanho de bloco fixo para eficiência de inferência (256 samples p/ throughput SIMD)
-                const BLOCK_SIZE: usize = 256;
+                const BLOCK_SIZE: usize = 64;
                 let mut chunk_buffer: Vec<f32> = Vec::with_capacity(BLOCK_SIZE);
 
                 eprintln!("[NEURAL AMP] Thread de inferência iniciada com BLOCK_SIZE={}.", BLOCK_SIZE);
