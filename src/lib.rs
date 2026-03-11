@@ -10,6 +10,9 @@ use crate::core::{dsp, ui};
 use crate::core::ui::ActivePanel;
 use crate::bridge::{ExternalProcessor, faust::FaustProcessor, mojo::MojoProcessor};
 
+// ─── DSP agora é conduzido por Mojo (Zero-Copy FFI) ─────────────────────────
+// Não há mais inferência ONNX via tract-onnx nem thread de background.
+
 // --- BASE CONFIG (TEMPLATE SCAFFOLDING) ---
 pub const APP_NAME: &str = "Distortion";
 pub const APP_ID: &str = "distortion";
@@ -24,9 +27,10 @@ pub struct BaseIO {
     params: Arc<BaseIOParams>,
     analyzer_consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     analyzer_producer: Producer<f32>,
-    neural_amp: dsp::NeuralAmpProcessor,
 
     faust: Option<FaustProcessor>,
+    /// Processador neural principal — substitui tract-onnx/ONNX.
+    /// Executa saturação suave (tanh) in-place via FFI Zero-Copy.
     mojo: Option<MojoProcessor>,
 }
 
@@ -38,7 +42,6 @@ impl Default for BaseIO {
             params: Arc::new(BaseIOParams::default()),
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
-            neural_amp: dsp::NeuralAmpProcessor::new("src/models/modelo_amp.onnx", 4096),
             faust: FaustProcessor::new(),
             mojo: Some(MojoProcessor::new()),
         }
@@ -192,30 +195,31 @@ impl Plugin for BaseIO {
         let neural_drive        = self.params.neural_drive.smoothed.next();
         let neural_output_gain  = self.params.neural_output_gain.smoothed.next();
         let neural_active       = self.params.neural_amp_active.value();
-        
-        if neural_active && self.neural_amp.is_ready() {
-            _context.set_latency_samples(self.neural_amp.latency());
-        } else {
-            _context.set_latency_samples(0);
-        }
+
+        // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
+        _context.set_latency_samples(0);
 
         // Recuperar referências slice-based do buffer do nih-plug para FFI zero-copy!
         let buffer_slices = buffer.as_slice();
         let num_samples = buffer_slices[0].len();
-        
+
         // 1. Processar com a abstração Faust FFI O(1) in-place
         if let Some(faust) = &mut self.faust {
-            // Se o Faust for mono/stereo na interface abstrata, passamos os canais.
-            // Para simplicidade na trait atual de "1 canal", processamos cada canal L, R.
             for channel in buffer_slices.iter_mut() {
                 faust.process_block(channel.as_mut_ptr(), num_samples);
             }
         }
 
-        // 2. Processar com a abstração Mojo FFI O(1) in-place
-        if let Some(mojo) = &mut self.mojo {
-            for channel in buffer_slices.iter_mut() {
-                mojo.process_block(channel.as_mut_ptr(), num_samples);
+        // 2. Processamento Neural via Mojo FFI (substitui ONNX/tract-onnx).
+        // drive e output_gain são passados por valor na assinatura FFI — zero-copy, sem estado global.
+        // O parâmetro neural_vol (volume master) é aplicado amostra-a-amostra abaixo.
+        if neural_active {
+            if let Some(mojo) = &mut self.mojo {
+                mojo.set_drive(neural_drive);
+                mojo.set_output_gain(neural_output_gain);
+                for channel in buffer_slices.iter_mut() {
+                    mojo.process_block(channel.as_mut_ptr(), num_samples);
+                }
             }
         }
 
@@ -235,34 +239,11 @@ impl Plugin for BaseIO {
                 l_out *= gain;
                 r_out *= gain;
 
-                if neural_active && self.neural_amp.is_ready() {
-                    let mono_in = (l_out + r_out) * 0.5;
-
-                    let peak_a = (mono_in * neural_drive).abs();
-                    
-                    self.neural_amp.push(mono_in * neural_drive);
-
-                    let (n_out, is_fallback) = if let Some(processed) = self.neural_amp.pop() {
-                        (processed * neural_output_gain, false)
-                    } else {
-                        (0.0, true) 
-                    };
-
-                    let peak_b = n_out.abs();
-
-                    thread_local! {
-                        static SAMPLE_COUNT: std::cell::Cell<u64> = std::cell::Cell::new(0);
-                    }
-                    SAMPLE_COUNT.with(|count| {
-                        let c = count.get();
-                        if c % 22050 == 0 {
-                            println!("[TELEMETRIA] Ponto A (Drive): {:.5} | Ponto B (Output): {:.5} | Fallback: {}", peak_a, peak_b, is_fallback);
-                        }
-                        count.set(c + 1);
-                    });
-
-                    l_out = n_out * neural_vol;
-                    r_out = n_out * neural_vol;
+                // O Mojo já processou os canais in-place acima (buffer_slices).
+                // Aqui apenas aplicamos o volume master neural sobre o resultado.
+                if neural_active {
+                    l_out *= neural_vol;
+                    r_out *= neural_vol;
                 }
 
             } else {

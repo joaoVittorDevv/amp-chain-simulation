@@ -5,7 +5,8 @@ use rtrb::{RingBuffer, Consumer};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
-use distortion::core::dsp::{AnalyzerDsp, NeuralAmpProcessor, FFT_SIZE};
+use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
+use distortion::bridge::{ExternalProcessor, mojo::MojoProcessor};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
 
 /// Estado completo compartilhado entre UI (eframe) e thread de áudio (CPAL).
@@ -172,7 +173,13 @@ fn audio_worker(
                     (None, None)
                 };
 
-                let mut neural_amp = NeuralAmpProcessor::new("src/models/modelo_amp.onnx", 4096);
+                // Processador Neural Mojo — FFI Zero-Copy
+                let mut neural_amp = MojoProcessor::new();
+                // Inicializa com sample_rate (usado para calibração interna do Mojo)
+                // No standalone o sample_rate vem do config do CPAL
+                neural_amp.init(44100.0); // fallback; será sobrescrito se config disponível
+                neural_amp.set_drive(2.0);       // drive padrão
+                neural_amp.set_output_gain(0.5); // output_gain padrão
                 let state_clone = standalone_state.clone();
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
@@ -196,16 +203,20 @@ fn audio_worker(
                                                     });
 
                                                     for frame in data.chunks(channels as usize) {
-                                                        let mut l = frame.get(l_idx).copied().unwrap_or(0.0);
-                                                        let mut r = frame.get(r_idx).copied().unwrap_or(0.0);
+                                                        let l_raw = frame.get(l_idx).copied().unwrap_or(0.0);
+                                                        let r_raw = frame.get(r_idx).copied().unwrap_or(0.0);
+
+                                                        let (mut l, mut r) = (l_raw, r_raw);
 
                                                         if !snap.bypass {
-                                                            if snap.neural_active && neural_amp.is_ready() {
-                                                                let mono_in = (l + r) * 0.5;
-                                                                neural_amp.push(mono_in);
-                                                                let n_out = neural_amp.pop().unwrap_or(0.0);
-                                                                l = n_out * snap.neural_vol;
-                                                                r = n_out * snap.neural_vol;
+                                                            if snap.neural_active {
+                                                                // Mojo processa in-place (bloco de 1 sample por canal)
+                                                                let mut l_buf = [l];
+                                                                let mut r_buf = [r];
+                                                                neural_amp.process_block(l_buf.as_mut_ptr(), 1);
+                                                                neural_amp.process_block(r_buf.as_mut_ptr(), 1);
+                                                                l = l_buf[0] * snap.neural_vol;
+                                                                r = r_buf[0] * snap.neural_vol;
                                                             }
                                                             if l.is_nan() || l.is_infinite() { l = 0.0; }
                                                             if r.is_nan() || r.is_infinite() { r = 0.0; }
