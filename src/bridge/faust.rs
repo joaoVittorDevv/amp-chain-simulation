@@ -21,6 +21,22 @@ impl FaustProcessor {
             Some(Self { handle })
         }
     }
+
+    pub fn set_eq_params(&mut self, low_f: f32, low_g: f32, low_q: f32, mid_f: f32, mid_g: f32, mid_q: f32, high_f: f32, high_g: f32, high_q: f32) {
+        unsafe {
+            faust_set_eq_low_freq(self.handle, low_f);
+            faust_set_eq_low_gain(self.handle, low_g);
+            faust_set_eq_low_q(self.handle, low_q);
+
+            faust_set_eq_mid_freq(self.handle, mid_f);
+            faust_set_eq_mid_gain(self.handle, mid_g);
+            faust_set_eq_mid_q(self.handle, mid_q);
+
+            faust_set_eq_high_freq(self.handle, high_f);
+            faust_set_eq_high_gain(self.handle, high_g);
+            faust_set_eq_high_q(self.handle, high_q);
+        }
+    }
 }
 
 impl Drop for FaustProcessor {

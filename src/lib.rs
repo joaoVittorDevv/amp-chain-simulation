@@ -135,6 +135,7 @@ impl Plugin for BaseIO {
                 });
 
                 let n_active = state.params.neural_amp_active.value();
+                let eq_active = state.params.eq_active.value();
                 let g_bypass = state.params.bypass.value();
 
                 ui::render_shared_panels(
@@ -142,12 +143,37 @@ impl Plugin for BaseIO {
                     &mut state.active_panel,
                     &state.analyzer.spectrum,
                     dsp::FFT_SIZE,
+                    eq_active,
                     n_active,
                     g_bypass,
+                    || {
+                        setter.begin_set_parameter(&state.params.eq_active);
+                        setter.set_parameter(&state.params.eq_active, !eq_active);
+                        setter.end_set_parameter(&state.params.eq_active);
+                    },
                     || {
                         setter.begin_set_parameter(&state.params.neural_amp_active);
                         setter.set_parameter(&state.params.neural_amp_active, !n_active);
                         setter.end_set_parameter(&state.params.neural_amp_active);
+                    },
+                    |ui| {
+                        ui.columns(3, |columns| {
+                            crate::core::ui::main_view::draw_eq_band(&mut columns[0], "BASS",
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_low_freq, setter)); },
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_low_gain, setter)); },
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_low_q, setter)); }
+                            );
+                            crate::core::ui::main_view::draw_eq_band(&mut columns[1], "MID",
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_mid_freq, setter)); },
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_mid_gain, setter)); },
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_mid_q, setter)); }
+                            );
+                            crate::core::ui::main_view::draw_eq_band(&mut columns[2], "TREBLE",
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_high_freq, setter)); },
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_high_gain, setter)); },
+                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_high_q, setter)); }
+                            );
+                        });
                     },
                     |ui| {
                         ui.label("Neural Drive:");
@@ -204,9 +230,22 @@ impl Plugin for BaseIO {
         let num_samples = buffer_slices[0].len();
 
         // 1. Processar com a abstração Faust FFI O(1) in-place
-        if let Some(faust) = &mut self.faust {
-            for channel in buffer_slices.iter_mut() {
-                faust.process_block(channel.as_mut_ptr(), num_samples);
+        if self.params.eq_active.value() {
+            if let Some(faust) = &mut self.faust {
+                faust.set_eq_params(
+                    self.params.eq_low_freq.smoothed.next(),
+                    self.params.eq_low_gain.smoothed.next(),
+                    self.params.eq_low_q.smoothed.next(),
+                    self.params.eq_mid_freq.smoothed.next(),
+                    self.params.eq_mid_gain.smoothed.next(),
+                    self.params.eq_mid_q.smoothed.next(),
+                    self.params.eq_high_freq.smoothed.next(),
+                    self.params.eq_high_gain.smoothed.next(),
+                    self.params.eq_high_q.smoothed.next(),
+                );
+                for channel in buffer_slices.iter_mut() {
+                    faust.process_block(channel.as_mut_ptr(), num_samples);
+                }
             }
         }
 

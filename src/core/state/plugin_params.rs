@@ -40,6 +40,31 @@ pub struct BaseIOParams {
 
     #[id = "neural_amp_active"]
     pub neural_amp_active: BoolParam,
+
+    // --- Parametric EQ ---
+    #[id = "eq_active"]
+    pub eq_active: BoolParam,
+
+    #[id = "eq_low_freq"]
+    pub eq_low_freq: FloatParam,
+    #[id = "eq_low_gain"]
+    pub eq_low_gain: FloatParam,
+    #[id = "eq_low_q"]
+    pub eq_low_q: FloatParam,
+
+    #[id = "eq_mid_freq"]
+    pub eq_mid_freq: FloatParam,
+    #[id = "eq_mid_gain"]
+    pub eq_mid_gain: FloatParam,
+    #[id = "eq_mid_q"]
+    pub eq_mid_q: FloatParam,
+
+    #[id = "eq_high_freq"]
+    pub eq_high_freq: FloatParam,
+    #[id = "eq_high_gain"]
+    pub eq_high_gain: FloatParam,
+    #[id = "eq_high_q"]
+    pub eq_high_q: FloatParam,
 }
 
 pub struct EditorState {
@@ -116,6 +141,30 @@ impl Default for BaseIOParams {
         .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
         neural_amp_active: BoolParam::new("Neural Amp Active", true),
+
+        // --- EQ Defaults ---
+        eq_active: BoolParam::new("EQ Active", true),
+
+        eq_low_freq: FloatParam::new("Low Freq", 100.0, FloatRange::Skewed { min: 20.0, max: 1000.0, factor: FloatRange::skew_factor(150.0) })
+            .with_smoother(SmoothingStyle::Logarithmic(50.0)).with_unit(" Hz").with_value_to_string(formatters::v2s_f32_hz_then_khz(2)).with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+        eq_low_gain: FloatParam::new("Low Gain", 0.0, FloatRange::Linear { min: -24.0, max: 24.0 })
+            .with_smoother(SmoothingStyle::Linear(50.0)).with_unit(" dB").with_value_to_string(formatters::v2s_f32_gain_to_db(2)).with_string_to_value(formatters::s2v_f32_gain_to_db()),
+        eq_low_q: FloatParam::new("Low Q", 0.707, FloatRange::Skewed { min: 0.1, max: 10.0, factor: FloatRange::skew_factor(1.0) })
+            .with_smoother(SmoothingStyle::Linear(50.0)).with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+        eq_mid_freq: FloatParam::new("Mid Freq", 1000.0, FloatRange::Skewed { min: 100.0, max: 10000.0, factor: FloatRange::skew_factor(1000.0) })
+            .with_smoother(SmoothingStyle::Logarithmic(50.0)).with_unit(" Hz").with_value_to_string(formatters::v2s_f32_hz_then_khz(2)).with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+        eq_mid_gain: FloatParam::new("Mid Gain", 0.0, FloatRange::Linear { min: -24.0, max: 24.0 })
+            .with_smoother(SmoothingStyle::Linear(50.0)).with_unit(" dB").with_value_to_string(formatters::v2s_f32_gain_to_db(2)).with_string_to_value(formatters::s2v_f32_gain_to_db()),
+        eq_mid_q: FloatParam::new("Mid Q", 1.0, FloatRange::Skewed { min: 0.1, max: 10.0, factor: FloatRange::skew_factor(1.0) })
+            .with_smoother(SmoothingStyle::Linear(50.0)).with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+        eq_high_freq: FloatParam::new("High Freq", 5000.0, FloatRange::Skewed { min: 1000.0, max: 20000.0, factor: FloatRange::skew_factor(5000.0) })
+            .with_smoother(SmoothingStyle::Logarithmic(50.0)).with_unit(" Hz").with_value_to_string(formatters::v2s_f32_hz_then_khz(2)).with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+        eq_high_gain: FloatParam::new("High Gain", 0.0, FloatRange::Linear { min: -24.0, max: 24.0 })
+            .with_smoother(SmoothingStyle::Linear(50.0)).with_unit(" dB").with_value_to_string(formatters::v2s_f32_gain_to_db(2)).with_string_to_value(formatters::s2v_f32_gain_to_db()),
+        eq_high_q: FloatParam::new("High Q", 0.707, FloatRange::Skewed { min: 0.1, max: 10.0, factor: FloatRange::skew_factor(1.0) })
+            .with_smoother(SmoothingStyle::Linear(50.0)).with_value_to_string(formatters::v2s_f32_rounded(2)),
         }
     }
 }

@@ -23,6 +23,19 @@ void faust_process(FaustHandle handle, float* buffer, f_size_t length);
 // Libera a memória alocada
 void faust_destroy(FaustHandle handle);
 
+// --- Novos Parâmetros FFI (Equalizador) ---
+void faust_set_eq_low_freq(FaustHandle handle, float freq);
+void faust_set_eq_low_gain(FaustHandle handle, float gain);
+void faust_set_eq_low_q(FaustHandle handle, float q);
+
+void faust_set_eq_mid_freq(FaustHandle handle, float freq);
+void faust_set_eq_mid_gain(FaustHandle handle, float gain);
+void faust_set_eq_mid_q(FaustHandle handle, float q);
+
+void faust_set_eq_high_freq(FaustHandle handle, float freq);
+void faust_set_eq_high_gain(FaustHandle handle, float gain);
+void faust_set_eq_high_q(FaustHandle handle, float q);
+
 #ifdef __cplusplus
 }
 #endif

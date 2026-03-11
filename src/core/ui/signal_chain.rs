@@ -4,14 +4,17 @@ use nih_plug_egui::egui;
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub enum ActivePanel {
     None,
+    EQ,
     NeuralAmp,
 }
 
 pub fn draw_signal_chain(
     ui: &mut egui::Ui,
     active_panel: &mut ActivePanel,
+    eq_active: bool,
     neural_active: bool,
     global_bypass: bool,
+    mut on_eq_toggle: impl FnMut(),
     mut on_neural_toggle: impl FnMut(),
 ) {
     let (rect, _response) = ui.allocate_exact_size(
@@ -116,11 +119,21 @@ pub fn draw_signal_chain(
         (response.clicked(), power_resp.clicked())
     };
 
-    // --- Node positions ---
     let total_span = end_x - start_x;
-    let neural_x = start_x + total_span * 0.5;
+    let eq_x = start_x + total_span * 0.33;
+    let neural_x = start_x + total_span * 0.67;
 
     // Draw nodes
+    let (eq_clicked, eq_power_clicked) = draw_node(
+        &painter,
+        ui,
+        eq_x,
+        "PARAM EQ",
+        "eq_node",
+        *active_panel == ActivePanel::EQ,
+        eq_active,
+    );
+
     let (neural_clicked, neural_power_clicked) = draw_node(
         &painter,
         ui,
@@ -130,6 +143,16 @@ pub fn draw_signal_chain(
         *active_panel == ActivePanel::NeuralAmp,
         neural_active,
     );
+
+    if eq_power_clicked {
+        on_eq_toggle();
+    } else if eq_clicked {
+        *active_panel = if *active_panel == ActivePanel::EQ {
+            ActivePanel::None
+        } else {
+            ActivePanel::EQ
+        };
+    }
 
     if neural_power_clicked {
         on_neural_toggle();

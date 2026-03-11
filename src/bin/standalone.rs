@@ -9,12 +9,41 @@ use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
 use distortion::bridge::{ExternalProcessor, mojo::MojoProcessor};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
 
-/// Estado completo compartilhado entre UI (eframe) e thread de áudio (CPAL).
 #[derive(Clone, Copy)]
 struct StandaloneState {
+    eq_active:         bool,
+    eq_low_freq:       f32,
+    eq_low_gain:       f32,
+    eq_low_q:          f32,
+    eq_mid_freq:       f32,
+    eq_mid_gain:       f32,
+    eq_mid_q:          f32,
+    eq_high_freq:      f32,
+    eq_high_gain:      f32,
+    eq_high_q:         f32,
     neural_active:     bool,
     neural_vol:        f32,
     bypass:            bool,
+}
+
+impl Default for StandaloneState {
+    fn default() -> Self {
+        Self {
+            eq_active: true,
+            eq_low_freq: 100.0,
+            eq_low_gain: 0.0,
+            eq_low_q: 0.707,
+            eq_mid_freq: 1000.0,
+            eq_mid_gain: 0.0,
+            eq_mid_q: 1.0,
+            eq_high_freq: 5000.0,
+            eq_high_gain: 0.0,
+            eq_high_q: 0.707,
+            neural_active: true,
+            neural_vol: 1.0,
+            bypass: false,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -198,9 +227,13 @@ fn audio_worker(
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[f32], _: &_| {
-                                                    let snap = state_clone.try_lock().map(|g| *g).unwrap_or(StandaloneState {
-                                                        neural_active: true, neural_vol: 1.0, bypass: false,
-                                                    });
+                                                    let snap = state_clone.try_lock().map(|g| *g).unwrap_or_else(|_| StandaloneState::default());
+                                                    
+                                                    // Inicia um Faust local para standalone se puder
+                                                    let mut local_faust = distortion::bridge::faust::FaustProcessor::new();
+                                                    if let Some(f) = &mut local_faust {
+                                                        f.init(strict_config.sample_rate.0 as f32);
+                                                    }
 
                                                     for frame in data.chunks(channels as usize) {
                                                         let l_raw = frame.get(l_idx).copied().unwrap_or(0.0);
@@ -209,6 +242,19 @@ fn audio_worker(
                                                         let (mut l, mut r) = (l_raw, r_raw);
 
                                                         if !snap.bypass {
+                                                            if snap.eq_active {
+                                                                if let Some(f) = &mut local_faust {
+                                                                    f.set_eq_params(
+                                                                        snap.eq_low_freq, snap.eq_low_gain, snap.eq_low_q,
+                                                                        snap.eq_mid_freq, snap.eq_mid_gain, snap.eq_mid_q,
+                                                                        snap.eq_high_freq, snap.eq_high_gain, snap.eq_high_q,
+                                                                    );
+                                                                    let mut f_buf = [l, r];
+                                                                    f.process_block(f_buf.as_mut_ptr(), 2);
+                                                                    l = f_buf[0];
+                                                                    r = f_buf[1];
+                                                                }
+                                                            }
                                                             if snap.neural_active {
                                                                 // Mojo processa in-place (bloco de 1 sample por canal)
                                                                 let mut l_buf = [l];
@@ -239,9 +285,7 @@ fn audio_worker(
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[i16], _: &_| {
-                                                    let snap = st_clone2.try_lock().map(|g| *g).unwrap_or(StandaloneState {
-                                                        neural_active: true, neural_vol: 1.0, bypass: false,
-                                                    });
+                                                    let snap = st_clone2.try_lock().map(|g| *g).unwrap_or_else(|_| StandaloneState::default());
                                                     for frame in data.chunks(channels as usize) {
                                                         let mut l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
                                                         let mut r = frame.get(r_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
@@ -379,11 +423,7 @@ impl StandaloneApp {
         let (tx_cmd, rx_worker) = channel();
         let (tx_worker, rx_event) = channel();
 
-        let standalone_state = Arc::new(Mutex::new(StandaloneState {
-            neural_active: true,
-            neural_vol: 1.0,
-            bypass: false,
-        }));
+        let standalone_state = Arc::new(Mutex::new(StandaloneState::default()));
 
         let cons_clone = cons_arc.clone();
         let state_clone = standalone_state.clone();
@@ -807,25 +847,76 @@ impl eframe::App for StandaloneApp {
 
         let snap_ui = self.standalone_state.lock()
             .map(|g| *g)
-            .unwrap_or(StandaloneState {
-                neural_active: true,
-                neural_vol: 1.0,
-                bypass: false,
-            });
+            .unwrap_or_else(|_| StandaloneState::default());
 
         let mut ui_neural_vol    = snap_ui.neural_vol;
+
+        let mut ui_eq_low_freq = snap_ui.eq_low_freq;
+        let mut ui_eq_low_gain = snap_ui.eq_low_gain;
+        let mut ui_eq_low_q    = snap_ui.eq_low_q;
+        
+        let mut ui_eq_mid_freq = snap_ui.eq_mid_freq;
+        let mut ui_eq_mid_gain = snap_ui.eq_mid_gain;
+        let mut ui_eq_mid_q    = snap_ui.eq_mid_q;
+        
+        let mut ui_eq_high_freq = snap_ui.eq_high_freq;
+        let mut ui_eq_high_gain = snap_ui.eq_high_gain;
+        let mut ui_eq_high_q    = snap_ui.eq_high_q;
 
         render_shared_panels(
             ctx,
             &mut self.active_panel,
             &self.analyzer.spectrum,
             FFT_SIZE,
+            snap_ui.eq_active,
             snap_ui.neural_active,
             snap_ui.bypass,
             || {
                 if let Ok(mut st) = self.standalone_state.lock() {
+                    st.eq_active = !snap_ui.eq_active;
+                }
+            },
+            || {
+                if let Ok(mut st) = self.standalone_state.lock() {
                     st.neural_active = !snap_ui.neural_active;
                 }
+            },
+            |ui| {
+                ui.columns(3, |columns| {
+                    let eq_changed = std::cell::Cell::new(false);
+                    
+                    distortion::core::ui::main_view::draw_eq_band(&mut columns[0], "BASS",
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_low_freq, 20.0..=1000.0).logarithmic(true).text("Hz")).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_low_gain, -24.0..=24.0).text("dB")).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_low_q, 0.1..=10.0).text("Q")).changed() { eq_changed.set(true); } }
+                    );
+
+                    distortion::core::ui::main_view::draw_eq_band(&mut columns[1], "MID",
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_mid_freq, 100.0..=10000.0).logarithmic(true).text("Hz")).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_mid_gain, -24.0..=24.0).text("dB")).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_mid_q, 0.1..=10.0).text("Q")).changed() { eq_changed.set(true); } }
+                    );
+
+                    distortion::core::ui::main_view::draw_eq_band(&mut columns[2], "TREBLE",
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_high_freq, 1000.0..=20000.0).logarithmic(true).text("Hz")).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_high_gain, -24.0..=24.0).text("dB")).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_high_q, 0.1..=10.0).text("Q")).changed() { eq_changed.set(true); } }
+                    );
+
+                    if eq_changed.get() {
+                        if let Ok(mut st) = self.standalone_state.lock() {
+                            st.eq_low_freq = ui_eq_low_freq;
+                            st.eq_low_gain = ui_eq_low_gain;
+                            st.eq_low_q    = ui_eq_low_q;
+                            st.eq_mid_freq = ui_eq_mid_freq;
+                            st.eq_mid_gain = ui_eq_mid_gain;
+                            st.eq_mid_q    = ui_eq_mid_q;
+                            st.eq_high_freq = ui_eq_high_freq;
+                            st.eq_high_gain = ui_eq_high_gain;
+                            st.eq_high_q    = ui_eq_high_q;
+                        }
+                    }
+                });
             },
             |ui| {
                 let mut changed = false;
