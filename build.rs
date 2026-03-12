@@ -70,7 +70,7 @@ fn main() {
         if should_rebuild {
             println!("cargo:warning=Recompilando Faust (.dsp -> .hpp)...");
             let status = Command::new("faust")
-                .args(&["-lang", "cpp", "-vec", "-i", "dsp/main.dsp", "-o", "dsp/FaustModule.hpp"])
+                .args(&["-lang", "cpp", "-vec", "-I", "faust-ddsp", "-i", "dsp/main.dsp", "-o", "dsp/FaustModule.hpp"])
                 .status()
                 .expect("Falha ao executar o compilador Faust.");
             

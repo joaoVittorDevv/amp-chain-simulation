@@ -1,4 +1,6 @@
 import("stdfaust.lib");
+diff = library("diff.lib");
+
 
 // --- Equalizador Paramétrico de 3 Bandas ---
 // Cada banda usa a estrutura de Peak EQ, configurada com: fi.peak_eq_cq(gain_dB, freq, Q)

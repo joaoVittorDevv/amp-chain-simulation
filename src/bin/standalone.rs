@@ -224,55 +224,79 @@ fn audio_worker(
                                     
                                     let stream_res = match config.sample_format() {
                                         cpal::SampleFormat::F32 => {
+                                            // INICIALIZAÇÃO DSP: Fora do loop de processamento!
+                                            // Pegamos o sample_rate do config e inicializamos uma única vez
+                                            let s_rate = strict_config.sample_rate.0 as f32;
+                                            
+                                            // Faust
+                                            let mut local_faust = distortion::bridge::faust::FaustProcessor::new();
+                                            if let Some(f) = &mut local_faust {
+                                                f.init(s_rate);
+                                            }
+                                            
+                                            // Mojo (Substituindo o dummy que estava fora do loop antes)
+                                            neural_amp.init(s_rate);
+
+                                            // Buffers temporários para processamento in-place em bloco
+                                            let mut buf_l = vec![0.0; buffer_size as usize];
+                                            let mut buf_r = vec![0.0; buffer_size as usize];
+
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[f32], _: &_| {
                                                     let snap = state_clone.try_lock().map(|g| *g).unwrap_or_else(|_| StandaloneState::default());
                                                     
-                                                    // Inicia um Faust local para standalone se puder
-                                                    let mut local_faust = distortion::bridge::faust::FaustProcessor::new();
-                                                    if let Some(f) = &mut local_faust {
-                                                        f.init(strict_config.sample_rate.0 as f32);
+                                                    // 1. Extrair canais da interface para nossos buffers
+                                                    // Preenchemos buf_l e buf_r iterando sobre os frames do CPAL
+                                                    let num_frames = data.len() / (channels as usize);
+                                                    let max_len = num_frames.min(buffer_size as usize);
+                                                    
+                                                    for (i, frame) in data.chunks(channels as usize).enumerate().take(max_len) {
+                                                        buf_l[i] = frame.get(l_idx).copied().unwrap_or(0.0);
+                                                        buf_r[i] = frame.get(r_idx).copied().unwrap_or(0.0);
                                                     }
 
-                                                    for frame in data.chunks(channels as usize) {
-                                                        let l_raw = frame.get(l_idx).copied().unwrap_or(0.0);
-                                                        let r_raw = frame.get(r_idx).copied().unwrap_or(0.0);
-
-                                                        let (mut l, mut r) = (l_raw, r_raw);
-
-                                                        if !snap.bypass {
-                                                            if snap.eq_active {
-                                                                if let Some(f) = &mut local_faust {
-                                                                    f.set_eq_params(
-                                                                        snap.eq_low_freq, snap.eq_low_gain, snap.eq_low_q,
-                                                                        snap.eq_mid_freq, snap.eq_mid_gain, snap.eq_mid_q,
-                                                                        snap.eq_high_freq, snap.eq_high_gain, snap.eq_high_q,
-                                                                    );
-                                                                    let mut f_buf = [l, r];
-                                                                    f.process_block(f_buf.as_mut_ptr(), 2);
-                                                                    l = f_buf[0];
-                                                                    r = f_buf[1];
-                                                                }
+                                                    // 2. Processamento DSP em Bloco
+                                                    if !snap.bypass {
+                                                        // A) Faust EQ (processa os dois canais num único array de ponteiros - se a API local_faust aguentar)
+                                                        // A nossa interface Faust process_block aplica a um array plano in-place
+                                                        if snap.eq_active {
+                                                            if let Some(f) = &mut local_faust {
+                                                                f.set_eq_params(
+                                                                    snap.eq_low_freq, snap.eq_low_gain, snap.eq_low_q,
+                                                                    snap.eq_mid_freq, snap.eq_mid_gain, snap.eq_mid_q,
+                                                                    snap.eq_high_freq, snap.eq_high_gain, snap.eq_high_q,
+                                                                );
+                                                                // FaustFfi foi feito para processar um ponteiro Float
+                                                                f.process_block(buf_l.as_mut_ptr(), max_len);
+                                                                f.process_block(buf_r.as_mut_ptr(), max_len);
                                                             }
-                                                            if snap.neural_active {
-                                                                // Mojo processa in-place (bloco de 1 sample por canal)
-                                                                let mut l_buf = [l];
-                                                                let mut r_buf = [r];
-                                                                neural_amp.process_block(l_buf.as_mut_ptr(), 1);
-                                                                neural_amp.process_block(r_buf.as_mut_ptr(), 1);
-                                                                l = l_buf[0] * snap.neural_vol;
-                                                                r = r_buf[0] * snap.neural_vol;
-                                                            }
-                                                            if l.is_nan() || l.is_infinite() { l = 0.0; }
-                                                            if r.is_nan() || r.is_infinite() { r = 0.0; }
                                                         }
+                                                        
+                                                        // B) Mojo Neural Amp
+                                                        if snap.neural_active {
+                                                            neural_amp.set_drive(snap.neural_vol); // Ajuste: usando neural_vol para simplificar standalone
+                                                            // Mojo FFI chama o processo otimizado do backend em batch para o canal L e R
+                                                            neural_amp.process_block(buf_l.as_mut_ptr(), max_len);
+                                                            neural_amp.process_block(buf_r.as_mut_ptr(), max_len);
+                                                            
+                                                            // Aplicar ganho neural final
+                                                            for l in &mut buf_l[..max_len] { *l *= snap.neural_vol; }
+                                                            for r in &mut buf_r[..max_len] { *r *= snap.neural_vol; }
+                                                        }
+                                                        
+                                                        // Limpeza de Infinitos ou NaN gerados pelo DSP
+                                                        for l in &mut buf_l[..max_len] { if l.is_nan() || l.is_infinite() { *l = 0.0; } }
+                                                        for r in &mut buf_r[..max_len] { if r.is_nan() || r.is_infinite() { *r = 0.0; } }
+                                                    }
 
-                                                        let mix = (l + r) * 0.5;
+                                                    // 3. Enviar para Output da Interface e Analisador Gráfico
+                                                    for i in 0..max_len {
+                                                        let mix = (buf_l[i] + buf_r[i]) * 0.5;
                                                         let _ = analyzer_producer.push(mix);
                                                         if let Some(pp) = pt_producer.as_mut() {
-                                                            let _ = pp.push(l);
-                                                            let _ = pp.push(r);
+                                                            let _ = pp.push(buf_l[i]);
+                                                            let _ = pp.push(buf_r[i]);
                                                         }
                                                     }
                                                 },

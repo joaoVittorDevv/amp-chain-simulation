@@ -58,6 +58,7 @@ O projeto combina três tecnologias em um único pipeline de processamento de á
 
 - **Papel**: Define o processamento de sinal linear (distorção, EQ, filtros) usando a linguagem de domínio específico do Faust.
 - **Integração**: O `build.rs` transpila `dsp/main.dsp → dsp/FaustModule.hpp` automaticamente via `faust -lang cpp`.
+- **Bibliotecas Externas**: Suporte para `faust-ddsp` (Differentiable Digital Signal Processing) integrado. A biblioteca está localizada em `faust-ddsp/` e é incluída automaticamente no path de busca do compilador Faust.
 - **Wrapper C**: O arquivo `dsp/wrapper.cpp` + `dsp/wrapper.h` expõem as funções do Faust como símbolos C puros para o Rust via `bindgen`.
 - **API pública** (`dsp/wrapper.h`):
   ```c
@@ -133,7 +134,7 @@ make run / make bundle
   check-env (scripts/check_env.sh)
        │
        ├──► build-faust
-       │         └── faust -lang cpp -i dsp/main.dsp -o dsp/FaustModule.hpp
+       │         └── faust -lang cpp -I faust-ddsp -i dsp/main.dsp -o dsp/FaustModule.hpp
        │
        ├──► build-mojo
        │         └── mojo build --emit shared-lib neural/main.mojo -o neural/libneural.so
@@ -220,6 +221,28 @@ void        faust_destroy(FaustHandle handle);
 O `bindgen` gera `bindings_faust.rs` a partir desse header e o inclui no Rust via:
 ```rust
 include!(concat!(env!("OUT_DIR"), "/bindings_faust.rs"));
+```
+
+### 3.3 Uso da Biblioteca `faust-ddsp` (`diff.lib`)
+
+A biblioteca `faust-ddsp` está configurada para uso global dentro do projeto. Você pode importá-la no seu arquivo `.dsp` de duas formas:
+
+#### Importação Padrão
+Como o diretório `faust-ddsp/` está no path de busca (`-I`), você pode simplesmente usar:
+```faust
+import("stdfaust.lib");
+import("diff.lib");
+
+process = diff.lp(1000, 0.7);
+```
+
+#### Importação via Variável (Recomendado)
+Para maior clareza conforme o padrão do projeto:
+```faust
+import("stdfaust.lib");
+diff = library("diff.lib");
+
+process = diff.lp(1000, 0.7);
 ```
 
 ---
@@ -415,6 +438,7 @@ Se o Mojo estiver instalado no `.venv` local, o `Makefile` e o `build.rs` detect
 | `dsp/main.dsp` | Lógica DSP em Faust (fonte da verdade do processamento linear) |
 | `dsp/wrapper.cpp` | Wrapper C++ que expõe o Faust ao Rust |
 | `dsp/wrapper.h` | Contrato ABI C para o `bindgen` |
+| `faust-ddsp/` | Biblioteca DDSP para Faust (local e integrada ao build) |
 | `neural/main.mojo` | Processamento neural em Mojo (fonte da verdade do neural) |
 | `neural/libneural.so` | Artefato compilado do Mojo (gerado pelo build, não versionado) |
 | `build.rs` | Orquestra: rebuild do Faust, rebuild do Mojo, cc::Build, bindgen, linking |
