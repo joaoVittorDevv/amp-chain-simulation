@@ -34,7 +34,7 @@ build-faust:
 	@mkdir -p dsp
 	@if command -v faust >/dev/null 2>&1; then \
 		if [ -f dsp/main.dsp ]; then \
-			faust -lang cpp -i dsp/main.dsp -o dsp/FaustModule.hpp; \
+			faust -lang cpp -cn mydsp -I faust-ddsp -i dsp/main.dsp -o dsp/FaustModule.hpp; \
 		else \
 			echo "⚠️ dsp/main.dsp não encontrado. Pulando etapa Faust."; \
 		fi \

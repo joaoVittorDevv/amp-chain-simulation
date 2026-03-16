@@ -5,14 +5,14 @@ import("stdfaust.lib");
 // Ideal para DDSP e modulação de parâmetros em tempo real sem estralos.
 //==============================================================================
 
-svf(f, q) = (tick ~ (_, _)) : (lp, hp, bp, notch)
+svf(f, q) = (tick ~ (_, _)) : (!, !, _, _, _, _)
 with {
     // Coeficientes calculados para estabilidade em altas frequências
     g = tan(ma.PI * f / ma.SR);
     d = 1.0 / q;
     h = 1.0 / (1.0 + g * (g + d));
 
-    tick(s1, s2, x) = s1_new, s2_new, (lp, hp, bp, notch)
+    tick(s1, s2, x) = s1_new, s2_new, lp, hp, bp, notch
     with {
         hp = (x - (d + g) * s1 - s2) * h;
         bp = g * hp + s1;
@@ -29,15 +29,30 @@ with {
 // gain_dB: Ganho em decibéis
 // freq: Frequência central em Hz
 // Q: Fator de qualidade
-peak_eq(gain_dB, freq, Q) = _ <: (notch * (1.0), bp * (V)) : +
+peak_eq(gain_dB, freq, Q) = svf(freq, Q) : (!, !, *(V), _) : +
 with {
     V = ba.db2linear(gain_dB);
-    // Para Peak EQ, o Q do SVF é o mesmo Q do filtro
-    (lp, hp, bp, notch) = svf(freq, Q);
 };
 
 // Low Pass Estável
-lp(freq, Q) = svf(freq, Q) : (_, !, !, !) : _;
+lp(freq, Q) = svf(freq, Q) : (_, !, !, !);
 
 // High Pass Estável
-hp(freq, Q) = svf(freq, Q) : (!, _, !, !) : _;
+hp(freq, Q) = svf(freq, Q) : (!, _, !, !);
+
+// Low Shelf Estável baseado em SVF
+// gain_dB: Ganho em decibéis
+// freq: Frequência de transição em Hz
+// Q: Fator de qualidade (controle da inclinação)
+low_shelf(gain_dB, freq, Q) = svf(freq, Q) : (*(V), _, *(gain_bp), !) :> _
+with {
+    V = ba.db2linear(gain_dB);
+    gain_bp = (1.0 / Q) * sqrt(V);
+};
+
+// High Shelf Estável baseado em SVF
+high_shelf(gain_dB, freq, Q) = svf(freq, Q) : (_, *(V), *(gain_bp), !) :> _
+with {
+    V = ba.db2linear(gain_dB);
+    gain_bp = (1.0 / Q) * sqrt(V);
+};
