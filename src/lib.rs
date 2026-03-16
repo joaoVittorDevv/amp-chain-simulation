@@ -138,6 +138,38 @@ impl Plugin for BaseIO {
                 let eq_active = state.params.eq_active.value();
                 let g_bypass = state.params.bypass.value();
 
+use egui_knob::{Knob, KnobStyle};
+
+                let make_knob = |ui: &mut egui::Ui, param: &FloatParam| {
+                    let mut value = param.value();
+                    let (min, max) = match param.range() {
+                        FloatRange::Linear { min, max } => (min, max),
+                        FloatRange::Skewed { min, max, .. } => (min, max),
+                        _ => (0.0, 1.0),
+                    };
+                    
+                    let response = ui.add(
+                        Knob::new(
+                            &mut value,
+                            min,
+                            max,
+                            KnobStyle::Wiper,
+                        )
+                        .with_size(45.0),
+                    );
+
+                    if response.drag_started() {
+                        setter.begin_set_parameter(param);
+                    }
+                    if response.changed() {
+                        setter.set_parameter(param, value);
+                    }
+                    if response.drag_stopped() {
+                        setter.end_set_parameter(param);
+                    }
+                    response
+                };
+
                 ui::render_shared_panels(
                     egui_ctx,
                     &mut state.active_panel,
@@ -159,31 +191,39 @@ impl Plugin for BaseIO {
                     |ui| {
                         ui.columns(3, |columns| {
                             crate::core::ui::main_view::draw_eq_band(&mut columns[0], "BASS",
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_low_freq, setter)); },
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_low_gain, setter)); },
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_low_q, setter)); }
+                                |ui| { make_knob(ui, &state.params.eq_low_freq); },
+                                |ui| { make_knob(ui, &state.params.eq_low_gain); },
+                                |ui| { make_knob(ui, &state.params.eq_low_q); }
                             );
                             crate::core::ui::main_view::draw_eq_band(&mut columns[1], "MID",
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_mid_freq, setter)); },
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_mid_gain, setter)); },
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_mid_q, setter)); }
+                                |ui| { make_knob(ui, &state.params.eq_mid_freq); },
+                                |ui| { make_knob(ui, &state.params.eq_mid_gain); },
+                                |ui| { make_knob(ui, &state.params.eq_mid_q); }
                             );
                             crate::core::ui::main_view::draw_eq_band(&mut columns[2], "TREBLE",
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_high_freq, setter)); },
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_high_gain, setter)); },
-                                |ui| { ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.eq_high_q, setter)); }
+                                |ui| { make_knob(ui, &state.params.eq_high_freq); },
+                                |ui| { make_knob(ui, &state.params.eq_high_gain); },
+                                |ui| { make_knob(ui, &state.params.eq_high_q); }
                             );
                         });
                     },
                     |ui| {
-                        ui.label("Neural Drive:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_drive, setter).with_width(120.0));
-                        
-                        ui.label("Neural Makeup:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_output_gain, setter).with_width(120.0));
-
-                        ui.label("Master Output:");
-                        ui.add(nih_plug_egui::widgets::ParamSlider::for_param(&state.params.neural_amp_volume, setter).with_width(120.0));
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.label("Neural Drive:");
+                                make_knob(ui, &state.params.neural_drive);
+                            });
+                            ui.add_space(10.0);
+                            ui.vertical(|ui| {
+                                ui.label("Neural Makeup:");
+                                make_knob(ui, &state.params.neural_output_gain);
+                            });
+                            ui.add_space(10.0);
+                            ui.vertical(|ui| {
+                                ui.label("Master Output:");
+                                make_knob(ui, &state.params.neural_amp_volume);
+                            });
+                        });
                     },
                 );
             }

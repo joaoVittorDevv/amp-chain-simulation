@@ -25,7 +25,8 @@ eframe = "0.31.0"
 fast-math = "0.1.1"
 hound = "3.5.1"
 nalgebra = "0.34.1"
-nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs"] }
+nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["assert_process_allocs", "standalone"] }
+nih_plug_vizia = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 nih_plug_egui = { git = "https://github.com/robbert-vdh/nih-plug.git" }
 num-complex = "0.4.6"
 realfft = "3.5.0"
@@ -33,6 +34,7 @@ rfd = "0.14.1"
 ringbuf = "0.4.8"
 rtrb = "0.3.3"
 rubato = "1.0.1"
+egui_knob = "0.2.0"
 
 [profile.release]
 lto = "thin"

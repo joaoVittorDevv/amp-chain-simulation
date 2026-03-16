@@ -908,23 +908,24 @@ impl eframe::App for StandaloneApp {
             |ui| {
                 ui.columns(3, |columns| {
                     let eq_changed = std::cell::Cell::new(false);
+                    use egui_knob::{Knob, KnobStyle};
                     
                     distortion::core::ui::main_view::draw_eq_band(&mut columns[0], "BASS",
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_low_freq, 20.0..=1000.0).logarithmic(true).text("Hz")).changed() { eq_changed.set(true); } },
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_low_gain, -24.0..=24.0).text("dB")).changed() { eq_changed.set(true); } },
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_low_q, 0.1..=10.0).text("Q")).changed() { eq_changed.set(true); } }
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_low_freq, 20.0, 1000.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_low_gain, -12.0, 12.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_low_q, 0.707, 10.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } }
                     );
 
                     distortion::core::ui::main_view::draw_eq_band(&mut columns[1], "MID",
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_mid_freq, 100.0..=10000.0).logarithmic(true).text("Hz")).changed() { eq_changed.set(true); } },
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_mid_gain, -24.0..=24.0).text("dB")).changed() { eq_changed.set(true); } },
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_mid_q, 0.1..=10.0).text("Q")).changed() { eq_changed.set(true); } }
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_mid_freq, 100.0, 10000.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_mid_gain, -12.0, 12.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_mid_q, 0.707, 10.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } }
                     );
 
                     distortion::core::ui::main_view::draw_eq_band(&mut columns[2], "TREBLE",
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_high_freq, 1000.0..=20000.0).logarithmic(true).text("Hz")).changed() { eq_changed.set(true); } },
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_high_gain, -24.0..=24.0).text("dB")).changed() { eq_changed.set(true); } },
-                        |ui| { if ui.add(egui::Slider::new(&mut ui_eq_high_q, 0.1..=10.0).text("Q")).changed() { eq_changed.set(true); } }
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_high_freq, 1000.0, 20000.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_high_gain, -12.0, 12.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } },
+                        |ui| { if ui.add(Knob::new(&mut ui_eq_high_q, 0.707, 10.0, KnobStyle::Wiper).with_size(45.0)).changed() { eq_changed.set(true); } }
                     );
 
                     if eq_changed.get() {
@@ -944,8 +945,13 @@ impl eframe::App for StandaloneApp {
             },
             |ui| {
                 let mut changed = false;
-                ui.label("Model Vol:");
-                if ui.add(egui::Slider::new(&mut ui_neural_vol, 0.0..=1.0)).changed() { changed = true; }
+                use egui_knob::{Knob, KnobStyle};
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label("Model Vol:");
+                        if ui.add(Knob::new(&mut ui_neural_vol, 0.0, 1.0, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                    });
+                });
                 if changed {
                     if let Ok(mut st) = self.standalone_state.lock() {
                         st.neural_vol = ui_neural_vol;
