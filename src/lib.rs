@@ -2,6 +2,7 @@ use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::{Arc, Mutex};
+use fft_convolver::FFTConvolver;
 
 pub mod core;
 pub mod bridge;
@@ -28,10 +29,13 @@ pub struct BaseIO {
     analyzer_consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     analyzer_producer: Producer<f32>,
 
-    faust: Option<FaustProcessor>,
+    faust: [Option<FaustProcessor>; 2],
     /// Processador neural principal — substitui tract-onnx/ONNX.
     /// Executa saturação suave (tanh) in-place via FFI Zero-Copy.
-    mojo: Option<MojoProcessor>,
+    mojo: [Option<MojoProcessor>; 2],
+    pre_eq_convolver: [Option<FFTConvolver<f32>>; 2],
+    cabinet_convolver: [Option<FFTConvolver<f32>>; 2],
+    temp_buffer: Vec<f32>,
 }
 
 impl Default for BaseIO {
@@ -42,8 +46,11 @@ impl Default for BaseIO {
             params: Arc::new(BaseIOParams::default()),
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
-            faust: FaustProcessor::new(),
-            mojo: Some(MojoProcessor::new()),
+            faust: [FaustProcessor::new(), FaustProcessor::new()],
+            mojo: [Some(MojoProcessor::new()), Some(MojoProcessor::new())],
+            pre_eq_convolver: [None, None],
+            cabinet_convolver: [None, None],
+            temp_buffer: Vec::new(),
         }
     }
 }
@@ -237,12 +244,50 @@ use egui_knob::{Knob, KnobStyle};
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         let sample_rate = buffer_config.sample_rate;
-        if let Some(faust) = &mut self.faust {
-            faust.init(sample_rate);
+        for f in &mut self.faust {
+            if let Some(faust) = f { faust.init(sample_rate); }
         }
-        if let Some(mojo) = &mut self.mojo {
-            mojo.init(sample_rate);
+        for m in &mut self.mojo {
+            if let Some(mojo) = m { mojo.init(sample_rate); }
         }
+
+        let base_path = "/home/jao/VSCode/distortion/meu-novo-plugin/neural/drive/";
+
+        // Helper genérico para carregar WAV f32 ou i16
+        let load_ir = |p: &str| -> Option<Vec<f32>> {
+            let mut reader = hound::WavReader::open(p).ok()?;
+            let pcm = reader.spec().sample_format == hound::SampleFormat::Int;
+            if pcm {
+                Some(reader.samples::<i16>().filter_map(Result::ok).map(|s| s as f32 / i16::MAX as f32).collect())
+            } else {
+                Some(reader.samples::<f32>().filter_map(Result::ok).collect())
+            }
+        };
+
+        // 1. Carregar o Pré-EQ
+        let pre_eq_path = format!("{}{}", base_path, "pre_eq_ir.wav");
+        if let Some(ir_samples) = load_ir(&pre_eq_path) {
+            let mut conv_l = FFTConvolver::default();
+            let mut conv_r = FFTConvolver::default();
+            if !ir_samples.is_empty() && conv_l.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() &&
+               conv_r.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() {
+                self.pre_eq_convolver = [Some(conv_l), Some(conv_r)];
+            }
+        }
+
+        // 2. Carregar a Caixa (Cabinet)
+        let cab_path = format!("{}{}", base_path, "cabinet_ir.wav");
+        if let Some(ir_samples) = load_ir(&cab_path) {
+            let mut conv_l = FFTConvolver::default();
+            let mut conv_r = FFTConvolver::default();
+            if !ir_samples.is_empty() && conv_l.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() &&
+               conv_r.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() {
+                self.cabinet_convolver = [Some(conv_l), Some(conv_r)];
+            }
+        }
+
+        self.temp_buffer.resize(buffer_config.max_buffer_size as usize, 0.0);
+
         true
     }
 
@@ -265,78 +310,106 @@ use egui_knob::{Knob, KnobStyle};
         // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
         _context.set_latency_samples(0);
 
-        // Recuperar referências slice-based do buffer do nih-plug para FFI zero-copy!
-        let buffer_slices = buffer.as_slice();
-        let num_samples = buffer_slices[0].len();
-
-        // 1. Processar com a abstração Faust FFI O(1) in-place
-        if self.params.eq_active.value() {
-            if let Some(faust) = &mut self.faust {
-                faust.set_eq_params(
-                    self.params.eq_low_freq.smoothed.next(),
-                    self.params.eq_low_gain.smoothed.next(),
-                    self.params.eq_low_q.smoothed.next(),
-                    self.params.eq_mid_freq.smoothed.next(),
-                    self.params.eq_mid_gain.smoothed.next(),
-                    self.params.eq_mid_q.smoothed.next(),
-                    self.params.eq_high_freq.smoothed.next(),
-                    self.params.eq_high_gain.smoothed.next(),
-                    self.params.eq_high_q.smoothed.next(),
-                );
-                for channel in buffer_slices.iter_mut() {
-                    faust.process_block(channel.as_mut_ptr(), num_samples);
-                }
-            }
-        }
-
-        // 2. Processamento Neural via Mojo FFI (substitui ONNX/tract-onnx).
-        // drive e output_gain são passados por valor na assinatura FFI — zero-copy, sem estado global.
-        // O parâmetro neural_vol (volume master) é aplicado amostra-a-amostra abaixo.
-        if neural_active {
-            if let Some(mojo) = &mut self.mojo {
-                mojo.set_drive(neural_drive);
-                mojo.set_output_gain(neural_output_gain);
-                for channel in buffer_slices.iter_mut() {
-                    mojo.process_block(channel.as_mut_ptr(), num_samples);
-                }
-            }
-        }
-
+        // Apply mono / input routing FIRST before doing any DSP processing!
         for mut channel_samples in buffer.iter_samples() {
-            let gain = self.params.gain.smoothed.next();
+            let mut l_in = 0.0;
 
-            let mut l_in = *channel_samples.get_mut(0).unwrap_or(&mut 0.0);
-            let r_in = *channel_samples.get_mut(1).unwrap_or(&mut l_in);
+            if let Some(l) = channel_samples.get_mut(0) { l_in = *l; }
+            // If there's a second channel, use it for Input2, otherwise default to l_in
+            let r_source = channel_samples.get_mut(1).map_or(l_in, |r| *r);
 
-            let (mut l_out, mut r_out) = match input_mode {
-                InputSelect::Stereo => (l_in, r_in),
+            let (l_selected, r_selected) = match input_mode {
+                InputSelect::Stereo => (l_in, r_source),
                 InputSelect::Input1 => (l_in, l_in),
-                InputSelect::Input2 => (r_in, r_in),
+                InputSelect::Input2 => (r_source, r_source),
             };
 
-            if !bypass {
-                l_out *= gain;
-                r_out *= gain;
+            // Aplica a seleção de input na própria buffer
+            if let Some(l) = channel_samples.get_mut(0) { *l = l_selected; }
+            if let Some(r) = channel_samples.get_mut(1) { *r = r_selected; }
+        }
 
-                // O Mojo já processou os canais in-place acima (buffer_slices).
-                // Aqui apenas aplicamos o volume master neural sobre o resultado.
-                if neural_active {
-                    l_out *= neural_vol;
-                    r_out *= neural_vol;
+        // Recuperar referências slice-based do buffer do nih-plug para FFI zero-copy!
+        let buffer_slices = buffer.as_slice();
+
+        // Processamento UNIFICADO (single-pass) seguindo o padrão do standalone
+        for (channel_idx, channel_samples) in buffer_slices.iter_mut().enumerate() {
+            let len = channel_samples.len();
+            let safe_idx = channel_idx.min(1);
+
+            if !bypass {
+                // ESTÁGIO 1: Faust EQ (3-band parametric)
+                if self.params.eq_active.value() {
+                    if let Some(faust) = &mut self.faust[safe_idx] {
+                        faust.set_eq_params(
+                            self.params.eq_low_freq.smoothed.next(),
+                            self.params.eq_low_gain.smoothed.next(),
+                            self.params.eq_low_q.smoothed.next(),
+                            self.params.eq_mid_freq.smoothed.next(),
+                            self.params.eq_mid_gain.smoothed.next(),
+                            self.params.eq_mid_q.smoothed.next(),
+                            self.params.eq_high_freq.smoothed.next(),
+                            self.params.eq_high_gain.smoothed.next(),
+                            self.params.eq_high_q.smoothed.next(),
+                        );
+                        faust.process_block(channel_samples.as_mut_ptr(), len);
+                    }
                 }
 
-            } else {
-                l_out = l_in;
-                r_out = r_in;
+                // ESTÁGIO 2: PRÉ-EQUALIZAÇÃO LTI (Pre-EQ Convolver)
+                if let Some(pre_eq) = &mut self.pre_eq_convolver[safe_idx] {
+                    self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
+                    if pre_eq.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
+                        channel_samples[..len].copy_from_slice(&self.temp_buffer[..len]);
+                    }
+                }
+
+                // ESTÁGIO 3: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
+                if neural_active {
+                    if let Some(mojo) = &mut self.mojo[safe_idx] {
+                        mojo.set_drive(neural_drive);
+                        mojo.set_output_gain(neural_output_gain);
+                        mojo.process_block(channel_samples.as_mut_ptr(), len);
+                    }
+                }
+
+                // ESTÁGIO 4: GABINETE (Cabinet IR Convolver)
+                if let Some(cabinet) = &mut self.cabinet_convolver[safe_idx] {
+                    self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
+                    if cabinet.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
+                        channel_samples[..len].copy_from_slice(&self.temp_buffer[..len]);
+                    }
+                }
+
+                // ESTÁGIO 5: Ganho Master
+                let gain = self.params.gain.smoothed.next();
+                for sample in channel_samples.iter_mut() {
+                    *sample *= gain;
+                }
+
+                // ESTÁGIO 6: Volume Master Neural (após processamento)
+                if neural_active {
+                    for sample in channel_samples.iter_mut() {
+                        *sample *= neural_vol;
+                    }
+                }
             }
 
-            if l_out.is_nan() || l_out.is_infinite() { l_out = 0.0; }
-            if r_out.is_nan() || r_out.is_infinite() { r_out = 0.0; }
+            // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+            for sample in channel_samples.iter_mut() {
+                if sample.is_nan() || sample.is_infinite() {
+                    *sample = 0.0;
+                }
+            }
+        }
 
-            if let Some(l) = channel_samples.get_mut(0) { *l = l_out; }
-            if let Some(r) = channel_samples.get_mut(1) { *r = r_out; }
-
-            let visual_sample = (l_out + r_out) * 0.5;
+        // Analyzer: amostra para visualização pós-processamento 
+        // e garante loop safe lendo as amostras resultantes
+        for mut channel_samples in buffer.iter_samples() {
+            let mut l_final = 0.0;
+            if let Some(l) = channel_samples.get_mut(0) { l_final = *l; }
+            // If there's a second channel, use it for Input2, otherwise default to l_in
+            let visual_sample = if let Some(r) = channel_samples.get_mut(1) { (l_final + *r) * 0.5 } else { l_final };
             let _ = self.analyzer_producer.push(visual_sample);
         }
 

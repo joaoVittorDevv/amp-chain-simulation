@@ -5,6 +5,7 @@ use rtrb::{RingBuffer, Consumer};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
+use fft_convolver::FFTConvolver;
 use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
 use distortion::bridge::{ExternalProcessor, mojo::MojoProcessor};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
@@ -202,13 +203,15 @@ fn audio_worker(
                     (None, None)
                 };
 
-                // Processador Neural Mojo — FFI Zero-Copy
-                let mut neural_amp = MojoProcessor::new();
-                // Inicializa com sample_rate (usado para calibração interna do Mojo)
-                // No standalone o sample_rate vem do config do CPAL
-                neural_amp.init(44100.0); // fallback; será sobrescrito se config disponível
-                neural_amp.set_drive(2.0);       // drive padrão
-                neural_amp.set_output_gain(0.5); // output_gain padrão
+                // Processadores Neurais Mojo (L/R) — FFI Zero-Copy
+                let mut neural_amp_l = MojoProcessor::new();
+                let mut neural_amp_r = MojoProcessor::new();
+                neural_amp_l.init(44100.0);
+                neural_amp_r.init(44100.0);
+                neural_amp_l.set_drive(2.0);
+                neural_amp_l.set_output_gain(0.5);
+                neural_amp_r.set_drive(2.0);
+                neural_amp_r.set_output_gain(0.5);
                 let state_clone = standalone_state.clone();
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
@@ -217,7 +220,7 @@ fn audio_worker(
                             if let Some(device) = devs.into_iter().find(|d| d.name().unwrap_or_default() == raw_name) {
                                 if let Ok(config) = device.default_input_config() {
                                     let mut strict_config: cpal::StreamConfig = config.clone().into();
-                                    strict_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+                                    strict_config.buffer_size = cpal::BufferSize::Default;
                                     let channels = strict_config.channels;
                                     let l_idx = left.min((channels.saturating_sub(1)) as usize);
                                     let r_idx = right.min((channels.saturating_sub(1)) as usize);
@@ -229,17 +232,62 @@ fn audio_worker(
                                             let s_rate = strict_config.sample_rate.0 as f32;
                                             
                                             // Faust
-                                            let mut local_faust = distortion::bridge::faust::FaustProcessor::new();
-                                            if let Some(f) = &mut local_faust {
+                                            let mut local_faust_l = distortion::bridge::faust::FaustProcessor::new();
+                                            let mut local_faust_r = distortion::bridge::faust::FaustProcessor::new();
+                                            if let Some(f) = &mut local_faust_l {
+                                                f.init(s_rate);
+                                            }
+                                            if let Some(f) = &mut local_faust_r {
                                                 f.init(s_rate);
                                             }
                                             
                                             // Mojo (Substituindo o dummy que estava fora do loop antes)
-                                            neural_amp.init(s_rate);
+                                            neural_amp_l.init(s_rate);
+                                            neural_amp_r.init(s_rate);
 
+                                            let base_path = "/home/jao/VSCode/distortion/meu-novo-plugin/neural/drive/";
+                                            
+                                            let mut pre_eq_l = FFTConvolver::default();
+                                            let mut pre_eq_r = FFTConvolver::default();
+                                            let mut cab_l = FFTConvolver::default();
+                                            let mut cab_r = FFTConvolver::default();
+
+                                            // Helper para carregar WAV f32 ou i16
+                                            let load_ir = |p: &str| -> Option<Vec<f32>> {
+                                                let mut reader = hound::WavReader::open(p).ok()?;
+                                                let pcm = reader.spec().sample_format == hound::SampleFormat::Int;
+                                                if pcm {
+                                                    Some(reader.samples::<i16>().filter_map(Result::ok).map(|s| s as f32 / i16::MAX as f32).collect())
+                                                } else {
+                                                    Some(reader.samples::<f32>().filter_map(Result::ok).collect())
+                                                }
+                                            };
+
+                                            // Carregar Pré-EQ
+                                            let pre_eq_path = format!("{}{}", base_path, "pre_eq_ir.wav");
+                                            if let Some(ir) = load_ir(&pre_eq_path) {
+                                                if !ir.is_empty() {
+                                                    let _ = pre_eq_l.init(buffer_size as usize, &ir);
+                                                    let _ = pre_eq_r.init(buffer_size as usize, &ir);
+                                                }
+                                            }
+
+                                            // Carregar Gabinete
+                                            let cab_path = format!("{}{}", base_path, "cabinet_ir.wav");
+                                            if let Some(ir) = load_ir(&cab_path) {
+                                                if !ir.is_empty() {
+                                                    let _ = cab_l.init(buffer_size as usize, &ir);
+                                                    let _ = cab_r.init(buffer_size as usize, &ir);
+                                                }
+                                            }
+
+                                            // Convolvers requerem .process para saber inicialização no loop ou assumimos ok se array preenchido
+                                            
                                             // Buffers temporários para processamento in-place em bloco
                                             let mut buf_l = vec![0.0; buffer_size as usize];
                                             let mut buf_r = vec![0.0; buffer_size as usize];
+                                            let mut temp_l = vec![0.0; buffer_size as usize];
+                                            let mut temp_r = vec![0.0; buffer_size as usize];
 
                                             device.build_input_stream(
                                                 &strict_config,
@@ -261,28 +309,58 @@ fn audio_worker(
                                                         // A) Faust EQ (processa os dois canais num único array de ponteiros - se a API local_faust aguentar)
                                                         // A nossa interface Faust process_block aplica a um array plano in-place
                                                         if snap.eq_active {
-                                                            if let Some(f) = &mut local_faust {
+                                                            if let Some(f) = &mut local_faust_l {
                                                                 f.set_eq_params(
                                                                     snap.eq_low_freq, snap.eq_low_gain, snap.eq_low_q,
                                                                     snap.eq_mid_freq, snap.eq_mid_gain, snap.eq_mid_q,
                                                                     snap.eq_high_freq, snap.eq_high_gain, snap.eq_high_q,
                                                                 );
-                                                                // FaustFfi foi feito para processar um ponteiro Float
                                                                 f.process_block(buf_l.as_mut_ptr(), max_len);
+                                                            }
+                                                            if let Some(f) = &mut local_faust_r {
+                                                                f.set_eq_params(
+                                                                    snap.eq_low_freq, snap.eq_low_gain, snap.eq_low_q,
+                                                                    snap.eq_mid_freq, snap.eq_mid_gain, snap.eq_mid_q,
+                                                                    snap.eq_high_freq, snap.eq_high_gain, snap.eq_high_q,
+                                                                );
                                                                 f.process_block(buf_r.as_mut_ptr(), max_len);
                                                             }
                                                         }
                                                         
-                                                        // B) Mojo Neural Amp
+                                                        // B) Wiener-Hammerstein Gray-Box
+                                                        // ESTÁGIO 1: PRÉ-EQUALIZAÇÃO LTI (Tone Stack) // Somente se válido
+                                                        // Precisamos proteger contra uninit calls de arrays zerados. Se array não for vazio, tem certeza q inicializou.
+                                                        // Porém, falhas no convolver geram f32 zerados.
+                                                        temp_l[..max_len].copy_from_slice(&buf_l[..max_len]);
+                                                        temp_r[..max_len].copy_from_slice(&buf_r[..max_len]);
+                                                        if pre_eq_l.process(&temp_l[..max_len], &mut buf_l[..max_len]).is_err() {
+                                                            buf_l[..max_len].copy_from_slice(&temp_l[..max_len]);
+                                                        }
+                                                        if pre_eq_r.process(&temp_r[..max_len], &mut buf_r[..max_len]).is_err() {
+                                                            buf_r[..max_len].copy_from_slice(&temp_r[..max_len]);
+                                                        }
+                                                        
+                                                        // ESTÁGIO 2: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
                                                         if snap.neural_active {
-                                                            neural_amp.set_drive(snap.neural_vol); // Ajuste: usando neural_vol para simplificar standalone
-                                                            // Mojo FFI chama o processo otimizado do backend em batch para o canal L e R
-                                                            neural_amp.process_block(buf_l.as_mut_ptr(), max_len);
-                                                            neural_amp.process_block(buf_r.as_mut_ptr(), max_len);
+                                                            neural_amp_l.set_drive(snap.neural_vol);
+                                                            neural_amp_l.process_block(buf_l.as_mut_ptr(), max_len);
+                                                            
+                                                            neural_amp_r.set_drive(snap.neural_vol);
+                                                            neural_amp_r.process_block(buf_r.as_mut_ptr(), max_len);
                                                             
                                                             // Aplicar ganho neural final
                                                             for l in &mut buf_l[..max_len] { *l *= snap.neural_vol; }
                                                             for r in &mut buf_r[..max_len] { *r *= snap.neural_vol; }
+                                                        }
+
+                                                        // ESTÁGIO 3: GABINETE (IR da Caixa / Resposta da Sala)
+                                                        temp_l[..max_len].copy_from_slice(&buf_l[..max_len]);
+                                                        temp_r[..max_len].copy_from_slice(&buf_r[..max_len]);
+                                                        if cab_l.process(&temp_l[..max_len], &mut buf_l[..max_len]).is_err() {
+                                                            buf_l[..max_len].copy_from_slice(&temp_l[..max_len]);
+                                                        }
+                                                        if cab_r.process(&temp_r[..max_len], &mut buf_r[..max_len]).is_err() {
+                                                            buf_r[..max_len].copy_from_slice(&temp_r[..max_len]);
                                                         }
                                                         
                                                         // Limpeza de Infinitos ou NaN gerados pelo DSP
@@ -355,7 +433,7 @@ fn audio_worker(
                             if let Some(device) = devs.into_iter().find(|d| d.name().unwrap_or_default() == raw_name) {
                                 if let Ok(config) = device.default_output_config() {
                                     let mut strict_config: cpal::StreamConfig = config.clone().into();
-                                    strict_config.buffer_size = cpal::BufferSize::Fixed(buffer_size);
+                                    strict_config.buffer_size = cpal::BufferSize::Default;
                                     let channels = strict_config.channels;
                                     let l_idx = left.min((channels.saturating_sub(1)) as usize);
                                     let r_idx = right.min((channels.saturating_sub(1)) as usize);

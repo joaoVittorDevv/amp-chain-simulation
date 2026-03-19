@@ -35,6 +35,7 @@ ringbuf = "0.4.8"
 rtrb = "0.3.3"
 rubato = "1.0.1"
 egui_knob = "0.2.0"
+fft-convolver = "0.3.0"
 
 [profile.release]
 lto = "thin"
