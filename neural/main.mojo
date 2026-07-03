@@ -3,8 +3,14 @@ from std.memory import UnsafePointer
 # ─── Funções @export (Interface C para o Rust via FFI) ────────────────────────
 
 @export
-fn mojo_init(sample_rate: Float64):
-    """Inicializa o processador com a taxa de amostragem do host."""
+fn mojo_init(sample_rate: Float32):
+    """Inicializa o processador com a taxa de amostragem do host.
+
+    O `sample_rate` (Float32) casa exatamente com o `f32` do lado Rust — não
+    truncar/expandir aqui é o que evita mismatch de ABI na fronteira FFI.
+    Atualmente é no-op: o parâmetro é mantido para consistência de API e uso
+    futuro (ex.: oversampling / ajuste de saturação dependente da taxa).
+    """
     pass
 
 @export

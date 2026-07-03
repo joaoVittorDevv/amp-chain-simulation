@@ -2,6 +2,8 @@ use super::ExternalProcessor;
 
 // Define as interfaces C que a biblioteca do Mojo deverá expor (.so / .dylib)
 extern "C" {
+    /// sample_rate: `f32` para casar com `Float32` no lado Mojo (ABI de 4 bytes).
+    /// Atualmente no-op no Mojo; mantido para consistência de API / uso futuro.
     fn mojo_init(sample_rate: f32);
     /// drive: ganho de entrada (pre-gain)
     /// output_gain: ganho de saída (post-saturação)
