@@ -23,7 +23,10 @@ struct StandaloneState {
     eq_high_gain:      f32,
     eq_high_q:         f32,
     neural_active:     bool,
-    neural_vol:        f32,
+    neural_drive:      f32,
+    neural_output_gain:f32,
+    neural_amp_volume: f32,
+    gain:              f32,
     bypass:            bool,
 }
 
@@ -41,7 +44,10 @@ impl Default for StandaloneState {
             eq_high_gain: 0.0,
             eq_high_q: 0.707,
             neural_active: true,
-            neural_vol: 1.0,
+            neural_drive: 1.0,
+            neural_output_gain: 1.0,
+            neural_amp_volume: 1.0,
+            gain: 1.0,
             bypass: false,
         }
     }
@@ -340,20 +346,18 @@ fn audio_worker(
                                                             buf_r[..max_len].copy_from_slice(&temp_r[..max_len]);
                                                         }
                                                         
-                                                        // ESTÁGIO 2: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
+                                                        // ESTÁGIO 3: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
                                                         if snap.neural_active {
-                                                            neural_amp_l.set_drive(snap.neural_vol);
+                                                            neural_amp_l.set_drive(snap.neural_drive);
+                                                            neural_amp_l.set_output_gain(snap.neural_output_gain);
                                                             neural_amp_l.process_block(buf_l.as_mut_ptr(), max_len);
-                                                            
-                                                            neural_amp_r.set_drive(snap.neural_vol);
+
+                                                            neural_amp_r.set_drive(snap.neural_drive);
+                                                            neural_amp_r.set_output_gain(snap.neural_output_gain);
                                                             neural_amp_r.process_block(buf_r.as_mut_ptr(), max_len);
-                                                            
-                                                            // Aplicar ganho neural final
-                                                            for l in &mut buf_l[..max_len] { *l *= snap.neural_vol; }
-                                                            for r in &mut buf_r[..max_len] { *r *= snap.neural_vol; }
                                                         }
 
-                                                        // ESTÁGIO 3: GABINETE (IR da Caixa / Resposta da Sala)
+                                                        // ESTÁGIO 4: GABINETE (IR da Caixa / Resposta da Sala)
                                                         temp_l[..max_len].copy_from_slice(&buf_l[..max_len]);
                                                         temp_r[..max_len].copy_from_slice(&buf_r[..max_len]);
                                                         if cab_l.process(&temp_l[..max_len], &mut buf_l[..max_len]).is_err() {
@@ -362,11 +366,21 @@ fn audio_worker(
                                                         if cab_r.process(&temp_r[..max_len], &mut buf_r[..max_len]).is_err() {
                                                             buf_r[..max_len].copy_from_slice(&temp_r[..max_len]);
                                                         }
-                                                        
-                                                        // Limpeza de Infinitos ou NaN gerados pelo DSP
-                                                        for l in &mut buf_l[..max_len] { if l.is_nan() || l.is_infinite() { *l = 0.0; } }
-                                                        for r in &mut buf_r[..max_len] { if r.is_nan() || r.is_infinite() { *r = 0.0; } }
+
+                                                        // ESTÁGIO 5: Ganho Master
+                                                        for l in &mut buf_l[..max_len] { *l *= snap.gain; }
+                                                        for r in &mut buf_r[..max_len] { *r *= snap.gain; }
+
+                                                        // ESTÁGIO 6: Volume Master Neural (após processamento)
+                                                        if snap.neural_active {
+                                                            for l in &mut buf_l[..max_len] { *l *= snap.neural_amp_volume; }
+                                                            for r in &mut buf_r[..max_len] { *r *= snap.neural_amp_volume; }
+                                                        }
                                                     }
+
+                                                    // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+                                                    for l in &mut buf_l[..max_len] { if l.is_nan() || l.is_infinite() { *l = 0.0; } }
+                                                    for r in &mut buf_r[..max_len] { if r.is_nan() || r.is_infinite() { *r = 0.0; } }
 
                                                     // 3. Enviar para Output da Interface e Analisador Gráfico
                                                     for i in 0..max_len {
@@ -392,10 +406,11 @@ fn audio_worker(
                                                         let mut l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
                                                         let mut r = frame.get(r_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
                                                         if !snap.bypass {
-                                                            // For I16, Neural Amp could be run here, but skipping for brevity
-                                                            if l.is_nan() || l.is_infinite() { l = 0.0; }
-                                                            if r.is_nan() || r.is_infinite() { r = 0.0; }
+                                                            // I16 path: sem DSP (apenas passthrough); reservado para cadeia futura.
                                                         }
+                                                        // Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+                                                        if l.is_nan() || l.is_infinite() { l = 0.0; }
+                                                        if r.is_nan() || r.is_infinite() { r = 0.0; }
                                                         let mix = (l + r) * 0.5;
                                                         let _ = analyzer_producer.push(mix);
                                                         if let Some(pp) = pt_producer.as_mut() {
@@ -951,7 +966,10 @@ impl eframe::App for StandaloneApp {
             .map(|g| *g)
             .unwrap_or_else(|_| StandaloneState::default());
 
-        let mut ui_neural_vol    = snap_ui.neural_vol;
+        let mut ui_neural_drive       = snap_ui.neural_drive;
+        let mut ui_neural_output_gain = snap_ui.neural_output_gain;
+        let mut ui_neural_amp_volume  = snap_ui.neural_amp_volume;
+        let mut ui_gain               = snap_ui.gain;
 
         let mut ui_eq_low_freq = snap_ui.eq_low_freq;
         let mut ui_eq_low_gain = snap_ui.eq_low_gain;
@@ -1024,15 +1042,39 @@ impl eframe::App for StandaloneApp {
             |ui| {
                 let mut changed = false;
                 use egui_knob::{Knob, KnobStyle};
+                // Ranges espelham exatamente o min..max dos FloatParam do plugin
+                // (o widget do plugin também é linear sobre min..max — o skew é ignorado pela knob).
+                // gain:              db_to_gain(-30..30) ≈ 0.0316..31.62
+                // neural_drive:      db_to_gain(0..30)   ≈ 1.0..31.62
+                // neural_output_gain:db_to_gain(-24..12) ≈ 0.0631..3.981
+                // neural_amp_volume: db_to_gain(-24..12) ≈ 0.0631..3.981
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
-                        ui.label("Model Vol:");
-                        if ui.add(Knob::new(&mut ui_neural_vol, 0.0, 1.0, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                        ui.label("Neural Drive:");
+                        if ui.add(Knob::new(&mut ui_neural_drive, 1.0, 31.6228, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                    });
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label("Neural Makeup:");
+                        if ui.add(Knob::new(&mut ui_neural_output_gain, 0.0631, 3.9811, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                    });
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label("Master Output:");
+                        if ui.add(Knob::new(&mut ui_neural_amp_volume, 0.0631, 3.9811, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                    });
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label("Master Gain:");
+                        if ui.add(Knob::new(&mut ui_gain, 0.0316, 31.6228, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
                     });
                 });
                 if changed {
                     if let Ok(mut st) = self.standalone_state.lock() {
-                        st.neural_vol = ui_neural_vol;
+                        st.neural_drive       = ui_neural_drive;
+                        st.neural_output_gain = ui_neural_output_gain;
+                        st.neural_amp_volume  = ui_neural_amp_volume;
+                        st.gain               = ui_gain;
                     }
                 }
             },
