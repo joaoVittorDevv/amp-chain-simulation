@@ -307,6 +307,7 @@ use egui_knob::{Knob, KnobStyle};
         let neural_drive        = self.params.neural_drive.smoothed.next();
         let neural_output_gain  = self.params.neural_output_gain.smoothed.next();
         let neural_active       = self.params.neural_amp_active.value();
+        let eq_active           = self.params.eq_active.value();
         let eq_low_freq         = self.params.eq_low_freq.smoothed.next();
         let eq_low_gain         = self.params.eq_low_gain.smoothed.next();
         let eq_low_q            = self.params.eq_low_q.smoothed.next();
@@ -349,7 +350,7 @@ use egui_knob::{Knob, KnobStyle};
 
             if !bypass {
                 // ESTÁGIO 1: Faust EQ (3-band parametric)
-                if self.params.eq_active.value() {
+                if eq_active {
                     if let Some(faust) = &mut self.faust[safe_idx] {
                         faust.set_eq_params(
                             eq_low_freq,
