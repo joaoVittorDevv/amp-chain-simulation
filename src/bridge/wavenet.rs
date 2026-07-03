@@ -2,7 +2,7 @@ use super::ExternalProcessor;
 use std::path::Path;
 use tract_onnx::prelude::*;
 
-type TractPlan = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
+type TractPlan = Arc<TypedRunnableModel>;
 
 /// History length (receptive field) required by the WaveNet model.
 const HISTORY_LEN: usize = 4096;
@@ -175,24 +175,23 @@ impl ExternalProcessor for WavenetProcessor {
         // other allocation occurs in process_block.
         // This is inherent to tract's API — the runtime engine takes ownership
         // of tensor data and does not accept borrowed slices.
-        let input_view = match tract_onnx::tract_ndarray::ArrayView3::from_shape(
-            (1, 1, total_len),
-            &self.input_buf,
-        ) {
-            Ok(v) => v,
-            Err(_) => return,
-        };
+        let input_view =
+            match tract_ndarray::ArrayView3::from_shape((1, 1, total_len), &self.input_buf) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
         let input_tensor: Tensor = input_view.to_owned().into();
 
         // ── run inference ─────────────────────────────────────────────
-        let result = match model.run(tvec!(input_tensor.into())) {
+        let result: TVec<TValue> = match model.run(tvec!(input_tensor.into_tvalue())) {
             Ok(r) => r,
             Err(_) => return,
         };
 
         // ── extract output into pre-allocated buffer ───────────────────
         self.output_buf.clear();
-        if let Ok(view) = result[0].to_array_view::<f32>() {
+        if let Ok(view) = result[0].to_plain_array_view::<f32>() {
+            let view: tract_ndarray::ArrayViewD<'_, f32> = view;
             if let Some(slice) = view.as_slice() {
                 if slice.len() >= length {
                     self.output_buf
