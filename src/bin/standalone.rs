@@ -406,10 +406,11 @@ fn audio_worker(
                                                         let mut l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
                                                         let mut r = frame.get(r_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
                                                         if !snap.bypass {
-                                                            // For I16, Neural Amp could be run here, but skipping for brevity
-                                                            if l.is_nan() || l.is_infinite() { l = 0.0; }
-                                                            if r.is_nan() || r.is_infinite() { r = 0.0; }
+                                                            // I16 path: sem DSP (apenas passthrough); reservado para cadeia futura.
                                                         }
+                                                        // Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+                                                        if l.is_nan() || l.is_infinite() { l = 0.0; }
+                                                        if r.is_nan() || r.is_infinite() { r = 0.0; }
                                                         let mix = (l + r) * 0.5;
                                                         let _ = analyzer_producer.push(mix);
                                                         if let Some(pp) = pt_producer.as_mut() {
@@ -968,6 +969,7 @@ impl eframe::App for StandaloneApp {
         let mut ui_neural_drive       = snap_ui.neural_drive;
         let mut ui_neural_output_gain = snap_ui.neural_output_gain;
         let mut ui_neural_amp_volume  = snap_ui.neural_amp_volume;
+        let mut ui_gain               = snap_ui.gain;
 
         let mut ui_eq_low_freq = snap_ui.eq_low_freq;
         let mut ui_eq_low_gain = snap_ui.eq_low_gain;
@@ -1040,20 +1042,31 @@ impl eframe::App for StandaloneApp {
             |ui| {
                 let mut changed = false;
                 use egui_knob::{Knob, KnobStyle};
+                // Ranges espelham exatamente o min..max dos FloatParam do plugin
+                // (o widget do plugin também é linear sobre min..max — o skew é ignorado pela knob).
+                // gain:              db_to_gain(-30..30) ≈ 0.0316..31.62
+                // neural_drive:      db_to_gain(0..30)   ≈ 1.0..31.62
+                // neural_output_gain:db_to_gain(-24..12) ≈ 0.0631..3.981
+                // neural_amp_volume: db_to_gain(-24..12) ≈ 0.0631..3.981
                 ui.horizontal(|ui| {
                     ui.vertical(|ui| {
                         ui.label("Neural Drive:");
-                        if ui.add(Knob::new(&mut ui_neural_drive, 1.0, 32.0, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                        if ui.add(Knob::new(&mut ui_neural_drive, 1.0, 31.6228, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
                     });
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
                         ui.label("Neural Makeup:");
-                        if ui.add(Knob::new(&mut ui_neural_output_gain, 0.0, 4.0, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                        if ui.add(Knob::new(&mut ui_neural_output_gain, 0.0631, 3.9811, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
                     });
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
                         ui.label("Master Output:");
-                        if ui.add(Knob::new(&mut ui_neural_amp_volume, 0.0, 4.0, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                        if ui.add(Knob::new(&mut ui_neural_amp_volume, 0.0631, 3.9811, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
+                    });
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label("Master Gain:");
+                        if ui.add(Knob::new(&mut ui_gain, 0.0316, 31.6228, KnobStyle::Wiper).with_size(45.0)).changed() { changed = true; }
                     });
                 });
                 if changed {
@@ -1061,6 +1074,7 @@ impl eframe::App for StandaloneApp {
                         st.neural_drive       = ui_neural_drive;
                         st.neural_output_gain = ui_neural_output_gain;
                         st.neural_amp_volume  = ui_neural_amp_volume;
+                        st.gain               = ui_gain;
                     }
                 }
             },
