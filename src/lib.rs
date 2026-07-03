@@ -302,10 +302,21 @@ use egui_knob::{Knob, KnobStyle};
         let input_mode   = self.params.input_select.value();
         let bypass       = self.params.bypass.value();
         
+        let gain                = self.params.gain.smoothed.next();
         let neural_vol          = self.params.neural_amp_volume.smoothed.next();
         let neural_drive        = self.params.neural_drive.smoothed.next();
         let neural_output_gain  = self.params.neural_output_gain.smoothed.next();
         let neural_active       = self.params.neural_amp_active.value();
+        let eq_active           = self.params.eq_active.value();
+        let eq_low_freq         = self.params.eq_low_freq.smoothed.next();
+        let eq_low_gain         = self.params.eq_low_gain.smoothed.next();
+        let eq_low_q            = self.params.eq_low_q.smoothed.next();
+        let eq_mid_freq         = self.params.eq_mid_freq.smoothed.next();
+        let eq_mid_gain         = self.params.eq_mid_gain.smoothed.next();
+        let eq_mid_q            = self.params.eq_mid_q.smoothed.next();
+        let eq_high_freq        = self.params.eq_high_freq.smoothed.next();
+        let eq_high_gain        = self.params.eq_high_gain.smoothed.next();
+        let eq_high_q           = self.params.eq_high_q.smoothed.next();
 
         // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
         _context.set_latency_samples(0);
@@ -339,18 +350,18 @@ use egui_knob::{Knob, KnobStyle};
 
             if !bypass {
                 // ESTÁGIO 1: Faust EQ (3-band parametric)
-                if self.params.eq_active.value() {
+                if eq_active {
                     if let Some(faust) = &mut self.faust[safe_idx] {
                         faust.set_eq_params(
-                            self.params.eq_low_freq.smoothed.next(),
-                            self.params.eq_low_gain.smoothed.next(),
-                            self.params.eq_low_q.smoothed.next(),
-                            self.params.eq_mid_freq.smoothed.next(),
-                            self.params.eq_mid_gain.smoothed.next(),
-                            self.params.eq_mid_q.smoothed.next(),
-                            self.params.eq_high_freq.smoothed.next(),
-                            self.params.eq_high_gain.smoothed.next(),
-                            self.params.eq_high_q.smoothed.next(),
+                            eq_low_freq,
+                            eq_low_gain,
+                            eq_low_q,
+                            eq_mid_freq,
+                            eq_mid_gain,
+                            eq_mid_q,
+                            eq_high_freq,
+                            eq_high_gain,
+                            eq_high_q,
                         );
                         faust.process_block(channel_samples.as_mut_ptr(), len);
                     }
@@ -382,7 +393,6 @@ use egui_knob::{Knob, KnobStyle};
                 }
 
                 // ESTÁGIO 5: Ganho Master
-                let gain = self.params.gain.smoothed.next();
                 for sample in channel_samples.iter_mut() {
                     *sample *= gain;
                 }
