@@ -367,7 +367,7 @@ use egui_knob::{Knob, KnobStyle};
                     }
                 }
 
-                // PRÉ-EQUALIZAÇÃO LTI (Pre-EQ Convolver)
+                // ESTÁGIO 2: PRÉ-EQUALIZAÇÃO LTI (Pre-EQ Convolver)
                 if let Some(pre_eq) = &mut self.pre_eq_convolver[safe_idx] {
                     self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
                     if pre_eq.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
@@ -375,7 +375,7 @@ use egui_knob::{Knob, KnobStyle};
                     }
                 }
 
-                // ESTÁGIO 2: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
+                // ESTÁGIO 3: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
                 if neural_active {
                     if let Some(mojo) = &mut self.mojo[safe_idx] {
                         mojo.set_drive(neural_drive);
@@ -384,7 +384,7 @@ use egui_knob::{Knob, KnobStyle};
                     }
                 }
 
-                // ESTÁGIO 3: GABINETE (Cabinet IR Convolver)
+                // ESTÁGIO 4: GABINETE (Cabinet IR Convolver)
                 if let Some(cabinet) = &mut self.cabinet_convolver[safe_idx] {
                     self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
                     if cabinet.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
@@ -392,12 +392,12 @@ use egui_knob::{Knob, KnobStyle};
                     }
                 }
 
-                // ESTÁGIO 4: Ganho Master
+                // ESTÁGIO 5: Ganho Master
                 for sample in channel_samples.iter_mut() {
                     *sample *= gain;
                 }
 
-                // ESTÁGIO 5: Volume Master Neural (após processamento)
+                // ESTÁGIO 6: Volume Master Neural (após processamento)
                 if neural_active {
                     for sample in channel_samples.iter_mut() {
                         *sample *= neural_vol;
@@ -405,7 +405,7 @@ use egui_knob::{Knob, KnobStyle};
                 }
             }
 
-            // ESTÁGIO 6: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+            // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
             for sample in channel_samples.iter_mut() {
                 if sample.is_nan() || sample.is_infinite() {
                     *sample = 0.0;
