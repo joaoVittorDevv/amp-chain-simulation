@@ -11,9 +11,12 @@ const HISTORY_LEN: usize = 4096;
 ///
 /// ## Real-time safety guarantees
 ///
-/// * **Zero heap allocations** in [`process_block`] — all working buffers (`input_buf`,
-///   `output_buf`, `history`) are pre-allocated during construction and reused every
-///   block via `clear()` + `extend_from_slice()`.
+/// * **Zero user-code heap allocations** in [`process_block`] — all working buffers
+///   (`input_buf`, `output_buf`, `history`) are pre-allocated during construction
+///   and reused every block via `clear()` + `extend_from_slice()`. The ONE exception
+///   is tract-onnx's internal `ArrayView::to_owned()` call (see below), which is an
+///   unavoidable library-internal allocation required by tract's tensor ownership
+///   model.
 /// * **No `Mutex` on the audio thread** — the ONNX session is exclusively owned by
 ///   this struct and only ever accessed from the single-threaded nih_plug audio
 ///   callback. Model loading happens during [`new`] (before the audio stream
@@ -46,6 +49,10 @@ pub struct WavenetProcessor {
 
     /// Pre-allocated output buffer. Capacity is `max_block_size`.
     output_buf: Vec<f32>,
+
+    /// Maximum block size the processor is configured to handle.
+    /// Used to enforce bounds at runtime so `extend_from_slice` never re-allocates.
+    max_block_size: usize,
 }
 
 impl WavenetProcessor {
@@ -72,6 +79,7 @@ impl WavenetProcessor {
             history,
             input_buf,
             output_buf,
+            max_block_size,
         }
     }
 
@@ -114,8 +122,12 @@ impl ExternalProcessor for WavenetProcessor {
     ///
     /// # Real-time safety
     ///
-    /// * No heap allocations — `input_buf` and `output_buf` are reused via
-    ///   `clear()` + `extend_from_slice()`. Capacity was reserved during `new()`.
+    /// * Zero user-code heap allocations — `input_buf` and `output_buf` are reused
+    ///   via `clear()` + `extend_from_slice()`. Capacity was reserved during `new()`.
+    ///   The ONE and ONLY allocation on this path is tract-onnx's internal
+    ///   `ArrayView::to_owned()` required to transfer tensor data ownership to the
+    ///   runtime engine. This is a library-internal allocation; no user-code Vec
+    ///   or Box allocations occur.
     /// * No locking — the model is accessed directly on the single-threaded
     ///   audio callback.
     ///
@@ -130,6 +142,19 @@ impl ExternalProcessor for WavenetProcessor {
             return;
         };
 
+        // ── enforce max block size ─────────────────────────────────────
+        // Capacity was reserved for exactly this bound; exceeding it causes
+        // a re-allocation (violating the real-time contract).
+        debug_assert!(
+            length <= self.max_block_size,
+            "process_block called with length {} but max_block_size is {}",
+            length,
+            self.max_block_size,
+        );
+        if length > self.max_block_size {
+            return;
+        }
+
         // ── safety: caller guarantees `buffer` is valid for `length` floats ─
         let input_slice = unsafe { std::slice::from_raw_parts(buffer, length) };
 
@@ -143,14 +168,20 @@ impl ExternalProcessor for WavenetProcessor {
 
         let total_len = HISTORY_LEN + length;
 
-        // Note: `to_owned()` allocates inside tract-onnx (unavoidable — the
-        // runtime requires owned tensor data), but this is a library-internal
-        // allocation, not a user-code Vec allocation.
-        let input_view =
-            match tract_onnx::tract_ndarray::ArrayView3::from_shape((1, 1, total_len), &self.input_buf) {
-                Ok(v) => v,
-                Err(_) => return,
-            };
+        // ── single unavoidable allocation ──────────────────────────────
+        // tract-onnx requires owned tensor data; `ArrayView::to_owned()` is the
+        // ONLY heap allocation on this hot path. It clones HISTORY_LEN + length
+        // floats into an internal ndarray buffer. No user-code Vec, Box, or
+        // other allocation occurs in process_block.
+        // This is inherent to tract's API — the runtime engine takes ownership
+        // of tensor data and does not accept borrowed slices.
+        let input_view = match tract_onnx::tract_ndarray::ArrayView3::from_shape(
+            (1, 1, total_len),
+            &self.input_buf,
+        ) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
         let input_tensor: Tensor = input_view.to_owned().into();
 
         // ── run inference ─────────────────────────────────────────────
@@ -164,25 +195,32 @@ impl ExternalProcessor for WavenetProcessor {
         if let Ok(view) = result[0].to_array_view::<f32>() {
             if let Some(slice) = view.as_slice() {
                 if slice.len() >= length {
-                    self.output_buf.extend_from_slice(&slice[slice.len() - length..]);
+                    self.output_buf
+                        .extend_from_slice(&slice[slice.len() - length..]);
                 }
             }
         }
 
         // ── write result back to caller's buffer ──────────────────────
-        if self.output_buf.len() >= length {
-            unsafe {
-                std::ptr::copy_nonoverlapping(self.output_buf.as_ptr(), buffer, length);
-            }
+        // Guard: if output extraction failed (output_buf stayed empty), bail
+        // out rather than writing undefined data or silently dropping output.
+        if self.output_buf.len() < length {
+            return;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(self.output_buf.as_ptr(), buffer, length);
         }
 
         // ── update rolling history ─────────────────────────────────────
-        if length >= HISTORY_LEN {
-            self.history.copy_from_slice(&input_slice[length - HISTORY_LEN..]);
-        } else {
-            let keep_old = HISTORY_LEN - length;
-            self.history.copy_within(length.., 0);
-            self.history[keep_old..].copy_from_slice(input_slice);
-        }
+        // IMPORTANT: read from self.input_buf (which still holds the ORIGINAL
+        // input data — `to_owned()` cloned it into the tensor) rather than from
+        // `input_slice`, which is a view into `buffer`. After the
+        // `copy_nonoverlapping` above, `buffer` contains processed output, so
+        // `input_slice` now points to processed data, not the original input.
+        //
+        // input_buf layout: [old_history (HISTORY_LEN) | current_input (length)]
+        // We want the last HISTORY_LEN elements as the new history.
+        self.history
+            .copy_from_slice(&self.input_buf[total_len - HISTORY_LEN..]);
     }
 }
