@@ -30,6 +30,7 @@ pub fn draw_eq_band(
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_shared_panels(
     ctx: &egui::Context,
     active_panel: &mut ActivePanel,
@@ -37,11 +38,14 @@ pub fn render_shared_panels(
     fft_size: usize,
     eq_active: bool,
     neural_active: bool,
+    cabinet_active: bool,
     global_bypass: bool,
     on_eq_toggle: impl FnMut(),
     on_neural_toggle: impl FnMut(),
+    on_cabinet_toggle: impl FnMut(),
     mut draw_eq_controls: impl FnMut(&mut egui::Ui),
     mut draw_neural_controls: impl FnMut(&mut egui::Ui),
+    mut draw_cabinet_controls: impl FnMut(&mut egui::Ui),
 ) {
     // --- Bottom panel: Controls ---
     if *active_panel != ActivePanel::None {
@@ -64,6 +68,9 @@ pub fn render_shared_panels(
                             draw_neural_controls(ui);
                         });
                     }
+                    ActivePanel::Cabinet => {
+                        draw_cabinet_controls(ui);
+                    }
                     ActivePanel::None => {}
                 }
             });
@@ -78,9 +85,11 @@ pub fn render_shared_panels(
                 active_panel,
                 eq_active,
                 neural_active,
+                cabinet_active,
                 global_bypass,
                 on_eq_toggle,
                 on_neural_toggle,
+                on_cabinet_toggle,
             );
         });
 
