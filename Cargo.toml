@@ -34,9 +34,16 @@ rfd = "0.14.1"
 ringbuf = "0.4.8"
 rtrb = "0.3.3"
 rubato = "1.0.1"
+audioadapter-buffers = "=2.0.0"
 egui_knob = "0.2.0"
 fft-convolver = "0.3.0"
 tract-onnx = "0.23"
+rusqlite = { version = "0.31", features = ["bundled"] }
+blake3 = "1"
+dirs = "5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
 
 [profile.release]
 lto = "thin"

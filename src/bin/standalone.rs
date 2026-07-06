@@ -2,15 +2,42 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use eframe::egui;
 use rtrb::{RingBuffer, Consumer};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::sync::mpsc::{channel, Sender, Receiver};
 use fft_convolver::FFTConvolver;
 use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
 use distortion::bridge::{ExternalProcessor, mojo::MojoProcessor};
+use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
 
-#[derive(Clone, Copy)]
+/// Default cabinet IR embedded in the standalone binary (relative to src/bin/).
+const DEFAULT_CABINET_IR: &[u8] = include_bytes!("../../neural/drive/cabinet_ir.wav");
+
+/// Pre-EQ (tone-stack) IR embedded in the standalone binary. Replaces the old
+/// hardcoded absolute path so the linear pre-EQ stage no longer depends on a file.
+const DEFAULT_PRE_EQ_IR: &[u8] = include_bytes!("../../neural/drive/pre_eq_ir.wav");
+
+/// Decode embedded WAV bytes to a flat f32 sample vector (i16 or f32), failing on
+/// any decode error. Used for the fixed pre-EQ IR.
+fn decode_wav_flat(bytes: &[u8]) -> Option<Vec<f32>> {
+    let mut reader = hound::WavReader::new(std::io::Cursor::new(bytes)).ok()?;
+    let spec = reader.spec();
+    match spec.sample_format {
+        hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<Vec<_>, _>>().ok(),
+        hound::SampleFormat::Int => {
+            let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
+            reader
+                .samples::<i32>()
+                .collect::<Result<Vec<_>, _>>()
+                .ok()
+                .map(|v| v.into_iter().map(|s| s as f32 / max).collect())
+        }
+    }
+}
+
+#[derive(Clone)]
 struct StandaloneState {
     eq_active:         bool,
     eq_low_freq:       f32,
@@ -28,6 +55,11 @@ struct StandaloneState {
     neural_amp_volume: f32,
     gain:              f32,
     bypass:            bool,
+    // --- Cabinet IR ---
+    cabinet_bypass:    bool,
+    cabinet_level:     f32,
+    cabinet_mix:       f32,
+    cab_active_hash:   String,
 }
 
 impl Default for StandaloneState {
@@ -49,7 +81,116 @@ impl Default for StandaloneState {
             neural_amp_volume: 1.0,
             gain: 1.0,
             bypass: false,
+            cabinet_bypass: false,
+            cabinet_level: 1.0,
+            cabinet_mix: 1.0,
+            cab_active_hash: String::new(),
         }
+    }
+}
+
+/// Copy-able subset of [`StandaloneState`] read by the audio callback, so the
+/// audio thread never clones the `cab_active_hash` String (no heap allocation).
+#[derive(Clone, Copy)]
+struct AudioSnapshot {
+    eq_active:         bool,
+    eq_low_freq:       f32,
+    eq_low_gain:       f32,
+    eq_low_q:          f32,
+    eq_mid_freq:       f32,
+    eq_mid_gain:       f32,
+    eq_mid_q:          f32,
+    eq_high_freq:      f32,
+    eq_high_gain:      f32,
+    eq_high_q:         f32,
+    neural_active:     bool,
+    neural_drive:      f32,
+    neural_output_gain:f32,
+    neural_amp_volume: f32,
+    gain:              f32,
+    bypass:            bool,
+    cabinet_bypass:    bool,
+    cabinet_level:     f32,
+    cabinet_mix:       f32,
+}
+
+impl StandaloneState {
+    fn audio(&self) -> AudioSnapshot {
+        AudioSnapshot {
+            eq_active: self.eq_active,
+            eq_low_freq: self.eq_low_freq,
+            eq_low_gain: self.eq_low_gain,
+            eq_low_q: self.eq_low_q,
+            eq_mid_freq: self.eq_mid_freq,
+            eq_mid_gain: self.eq_mid_gain,
+            eq_mid_q: self.eq_mid_q,
+            eq_high_freq: self.eq_high_freq,
+            eq_high_gain: self.eq_high_gain,
+            eq_high_q: self.eq_high_q,
+            neural_active: self.neural_active,
+            neural_drive: self.neural_drive,
+            neural_output_gain: self.neural_output_gain,
+            neural_amp_volume: self.neural_amp_volume,
+            gain: self.gain,
+            bypass: self.bypass,
+            cabinet_bypass: self.cabinet_bypass,
+            cabinet_level: self.cabinet_level,
+            cabinet_mix: self.cabinet_mix,
+        }
+    }
+}
+
+impl Default for AudioSnapshot {
+    fn default() -> Self {
+        StandaloneState::default().audio()
+    }
+}
+
+/// Open the standalone's cabinet library (same location as the plugin) and seed
+/// the embedded default IR when empty.
+fn open_cabinet_library() -> CabinetLibrary {
+    let lib = dirs::data_dir()
+        .map(|d| d.join("distortion"))
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            CabinetLibrary::new(&dir.join("cabinet_irs.db")).ok()
+        })
+        .or_else(|| CabinetLibrary::new(std::path::Path::new(":memory:")).ok())
+        .expect("failed to open cabinet library (even in-memory)");
+    let _ = lib.seed_default_ir(DEFAULT_CABINET_IR);
+    lib
+}
+
+/// Path to the standalone selection persistence file.
+fn standalone_config_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|d| d.join("distortion").join("standalone.json"))
+}
+
+/// Load the persisted active cabinet hash, if any.
+fn load_persisted_hash() -> Option<String> {
+    let path = standalone_config_path()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    json.get("cab_active_hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Persist the active cabinet hash to `standalone.json`, merging into any
+/// existing config so unrelated keys are preserved (N2).
+fn save_persisted_hash(hash: &str) {
+    if let Some(path) = standalone_config_path() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // Load-and-merge rather than overwrite the whole document.
+        let mut json = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .filter(|v| v.is_object())
+            .unwrap_or_else(|| serde_json::json!({}));
+        json["cab_active_hash"] = serde_json::Value::String(hash.to_string());
+        let _ = std::fs::write(path, serde_json::to_string_pretty(&json).unwrap_or_default());
     }
 }
 
@@ -112,6 +253,13 @@ struct StandaloneApp {
 
     standalone_state: Arc<Mutex<StandaloneState>>,
 
+    // --- Cabinet IR (UI-thread handles) ---
+    cabinet_library: Arc<Mutex<CabinetLibrary>>,
+    cabinet_mailbox: Arc<CabinetMailbox>,
+    cabinet_sr: Arc<AtomicU32>,
+    cabinet_max_block: Arc<AtomicUsize>,
+    cabinet_error: Arc<Mutex<Option<String>>>,
+
     tx_cmd: Sender<AudioCommand>,
     rx_event: Receiver<AudioEvent>,
 }
@@ -139,6 +287,10 @@ fn audio_worker(
     tx_event: Sender<AudioEvent>,
     consumer_mutex: Arc<Mutex<Option<Consumer<f32>>>>,
     standalone_state: Arc<Mutex<StandaloneState>>,
+    cabinet_mailbox: Arc<CabinetMailbox>,
+    cabinet_library: Arc<Mutex<CabinetLibrary>>,
+    cabinet_sr: Arc<AtomicU32>,
+    cabinet_max_block: Arc<AtomicUsize>,
 ) {
     let mut _input_stream: Option<Stream> = None;
     let mut _output_stream: Option<Stream> = None;
@@ -251,44 +403,47 @@ fn audio_worker(
                                             neural_amp_l.init(s_rate);
                                             neural_amp_r.init(s_rate);
 
-                                            let base_path = "/home/jao/VSCode/distortion/meu-novo-plugin/neural/drive/";
-                                            
                                             let mut pre_eq_l = FFTConvolver::default();
                                             let mut pre_eq_r = FFTConvolver::default();
-                                            let mut cab_l = FFTConvolver::default();
-                                            let mut cab_r = FFTConvolver::default();
 
-                                            // Helper para carregar WAV f32 ou i16
-                                            let load_ir = |p: &str| -> Option<Vec<f32>> {
-                                                let mut reader = hound::WavReader::open(p).ok()?;
-                                                let pcm = reader.spec().sample_format == hound::SampleFormat::Int;
-                                                if pcm {
-                                                    Some(reader.samples::<i16>().filter_map(Result::ok).map(|s| s as f32 / i16::MAX as f32).collect())
-                                                } else {
-                                                    Some(reader.samples::<f32>().filter_map(Result::ok).collect())
-                                                }
-                                            };
-
-                                            // Carregar Pré-EQ
-                                            let pre_eq_path = format!("{}{}", base_path, "pre_eq_ir.wav");
-                                            if let Some(ir) = load_ir(&pre_eq_path) {
+                                            // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
+                                            if let Some(ir) = decode_wav_flat(DEFAULT_PRE_EQ_IR) {
                                                 if !ir.is_empty() {
                                                     let _ = pre_eq_l.init(buffer_size as usize, &ir);
                                                     let _ = pre_eq_r.init(buffer_size as usize, &ir);
                                                 }
                                             }
 
-                                            // Carregar Gabinete
-                                            let cab_path = format!("{}{}", base_path, "cabinet_ir.wav");
-                                            if let Some(ir) = load_ir(&cab_path) {
-                                                if !ir.is_empty() {
-                                                    let _ = cab_l.init(buffer_size as usize, &ir);
-                                                    let _ = cab_r.init(buffer_size as usize, &ir);
+                                            // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
+                                            cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
+                                            cabinet_max_block.store(buffer_size as usize, Ordering::Relaxed);
+                                            let mut cabinet_engine = CabinetEngine::with_mailbox(cabinet_mailbox.clone());
+                                            cabinet_engine.set_sample_rate(s_rate);
+                                            {
+                                                // Resolver o IR ativo e publicar um runtime para este sample rate.
+                                                let mut hash = state_clone
+                                                    .lock()
+                                                    .ok()
+                                                    .map(|s| s.cab_active_hash.clone())
+                                                    .unwrap_or_default();
+                                                if hash.is_empty() {
+                                                    hash = cabinet_library
+                                                        .lock()
+                                                        .ok()
+                                                        .and_then(|l| l.get_selected_hash().ok().flatten())
+                                                        .unwrap_or_default();
+                                                }
+                                                if !hash.is_empty() {
+                                                    if let Ok(l) = cabinet_library.lock() {
+                                                        if let Ok((_, bytes)) = l.get_ir_by_hash(&hash) {
+                                                            if let Ok(rt) = CabinetRuntime::build(&bytes, s_rate, buffer_size as usize) {
+                                                                cabinet_mailbox.publish(rt);
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
 
-                                            // Convolvers requerem .process para saber inicialização no loop ou assumimos ok se array preenchido
-                                            
                                             // Buffers temporários para processamento in-place em bloco
                                             let mut buf_l = vec![0.0; buffer_size as usize];
                                             let mut buf_r = vec![0.0; buffer_size as usize];
@@ -298,8 +453,8 @@ fn audio_worker(
                                             device.build_input_stream(
                                                 &strict_config,
                                                 move |data: &[f32], _: &_| {
-                                                    let snap = state_clone.try_lock().map(|g| *g).unwrap_or_else(|_| StandaloneState::default());
-                                                    
+                                                    let snap = state_clone.try_lock().map(|g| g.audio()).unwrap_or_else(|_| AudioSnapshot::default());
+
                                                     // 1. Extrair canais da interface para nossos buffers
                                                     // Preenchemos buf_l e buf_r iterando sobre os frames do CPAL
                                                     let num_frames = data.len() / (channels as usize);
@@ -357,15 +512,16 @@ fn audio_worker(
                                                             neural_amp_r.process_block(buf_r.as_mut_ptr(), max_len);
                                                         }
 
-                                                        // ESTÁGIO 4: GABINETE (IR da Caixa / Resposta da Sala)
-                                                        temp_l[..max_len].copy_from_slice(&buf_l[..max_len]);
-                                                        temp_r[..max_len].copy_from_slice(&buf_r[..max_len]);
-                                                        if cab_l.process(&temp_l[..max_len], &mut buf_l[..max_len]).is_err() {
-                                                            buf_l[..max_len].copy_from_slice(&temp_l[..max_len]);
-                                                        }
-                                                        if cab_r.process(&temp_r[..max_len], &mut buf_r[..max_len]).is_err() {
-                                                            buf_r[..max_len].copy_from_slice(&temp_r[..max_len]);
-                                                        }
+                                                        // ESTÁGIO 4: GABINETE (Cabinet IR gerenciado — troca em runtime via ArcSwap)
+                                                        cabinet_engine.process(
+                                                            &mut buf_l[..max_len],
+                                                            &mut buf_r[..max_len],
+                                                            &mut temp_l[..max_len],
+                                                            &mut temp_r[..max_len],
+                                                            snap.cabinet_bypass,
+                                                            snap.cabinet_level,
+                                                            snap.cabinet_mix,
+                                                        );
 
                                                         // ESTÁGIO 5: Ganho Master
                                                         for l in &mut buf_l[..max_len] { *l *= snap.gain; }
@@ -396,36 +552,13 @@ fn audio_worker(
                                                 None
                                             )
                                         },
-                                        cpal::SampleFormat::I16 => {
-                                            let st_clone2 = standalone_state.clone();
-                                            device.build_input_stream(
-                                                &strict_config,
-                                                move |data: &[i16], _: &_| {
-                                                    let snap = st_clone2.try_lock().map(|g| *g).unwrap_or_else(|_| StandaloneState::default());
-                                                    for frame in data.chunks(channels as usize) {
-                                                        let mut l = frame.get(l_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
-                                                        let mut r = frame.get(r_idx).copied().unwrap_or(0) as f32 / i16::MAX as f32;
-                                                        if !snap.bypass {
-                                                            // I16 path: sem DSP (apenas passthrough); reservado para cadeia futura.
-                                                        }
-                                                        // Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
-                                                        if l.is_nan() || l.is_infinite() { l = 0.0; }
-                                                        if r.is_nan() || r.is_infinite() { r = 0.0; }
-                                                        let mix = (l + r) * 0.5;
-                                                        let _ = analyzer_producer.push(mix);
-                                                        if let Some(pp) = pt_producer.as_mut() {
-                                                            let _ = pp.push(l);
-                                                            let _ = pp.push(r);
-                                                        }
-                                                    }
-                                                },
-                                                |err| eprintln!("Input error: {:?}", err),
-                                                None
-                                            )
-                                        },
+                                        // Non-F32 input formats are rejected explicitly rather than
+                                        // silently passed through DSP-free (which broke plugin/standalone
+                                        // parity). The whole DSP chain — Faust, Neural and Cabinet — runs
+                                        // in f32; select an F32-capable device/driver to enable it.
                                         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported)
                                     };
-                                    
+
                                     match stream_res {
                                         Ok(str) => {
                                             if let Err(e) = str.play() {
@@ -434,7 +567,15 @@ fn audio_worker(
                                                 _input_stream = Some(str);
                                             }
                                         }
-                                        Err(e) => { err_msg = Some(format!("Erro buffer: {:?}", e)); }
+                                        Err(e) => {
+                                            err_msg = Some(match config.sample_format() {
+                                                cpal::SampleFormat::F32 => format!("Erro buffer: {:?}", e),
+                                                other => format!(
+                                                    "Formato de entrada {:?} não suportado — a cadeia de DSP (Faust/Neural/Cabinet) requer amostras F32. Selecione outro dispositivo ou driver de áudio.",
+                                                    other
+                                                ),
+                                            });
+                                        }
                                     }
                                 }
                             } else {
@@ -540,12 +681,46 @@ impl StandaloneApp {
         let (tx_cmd, rx_worker) = channel();
         let (tx_worker, rx_event) = channel();
 
-        let standalone_state = Arc::new(Mutex::new(StandaloneState::default()));
+        // --- Cabinet IR setup (shared library + lock-free mailbox) ---
+        let cabinet_library = Arc::new(Mutex::new(open_cabinet_library()));
+        let cabinet_mailbox = CabinetMailbox::new_arc();
+        let cabinet_sr = Arc::new(AtomicU32::new(48_000));
+        let cabinet_max_block = Arc::new(AtomicUsize::new(2048));
+        let cabinet_error = Arc::new(Mutex::new(None));
+
+        // Resolve the persisted (or seeded default) selection into the shared state.
+        let mut initial_state = StandaloneState::default();
+        let resolved_hash = load_persisted_hash().unwrap_or_default();
+        let resolved_hash = if resolved_hash.is_empty() {
+            cabinet_library
+                .lock()
+                .ok()
+                .and_then(|l| l.get_selected_hash().ok().flatten())
+                .unwrap_or_default()
+        } else {
+            resolved_hash
+        };
+        initial_state.cab_active_hash = resolved_hash;
+
+        let standalone_state = Arc::new(Mutex::new(initial_state));
 
         let cons_clone = cons_arc.clone();
         let state_clone = standalone_state.clone();
+        let mailbox_clone = cabinet_mailbox.clone();
+        let library_clone = cabinet_library.clone();
+        let sr_clone = cabinet_sr.clone();
+        let maxb_clone = cabinet_max_block.clone();
         thread::spawn(move || {
-            audio_worker(rx_worker, tx_worker, cons_clone, state_clone);
+            audio_worker(
+                rx_worker,
+                tx_worker,
+                cons_clone,
+                state_clone,
+                mailbox_clone,
+                library_clone,
+                sr_clone,
+                maxb_clone,
+            );
         });
 
         let mut app = Self {
@@ -580,10 +755,15 @@ impl StandaloneApp {
             is_loading: true,
             active_panel: ActivePanel::None,
             standalone_state,
+            cabinet_library,
+            cabinet_mailbox,
+            cabinet_sr,
+            cabinet_max_block,
+            cabinet_error,
             tx_cmd,
             rx_event,
         };
-        
+
         app.refresh_devices();
         app
     }
@@ -962,8 +1142,11 @@ impl eframe::App for StandaloneApp {
             self.show_error_popup = open;
         }
 
+        // Drop any parked (old) cabinet runtime on this UI thread.
+        self.cabinet_mailbox.collect_garbage();
+
         let snap_ui = self.standalone_state.lock()
-            .map(|g| *g)
+            .map(|g| g.clone())
             .unwrap_or_else(|_| StandaloneState::default());
 
         let mut ui_neural_drive       = snap_ui.neural_drive;
@@ -983,6 +1166,22 @@ impl eframe::App for StandaloneApp {
         let mut ui_eq_high_gain = snap_ui.eq_high_gain;
         let mut ui_eq_high_q    = snap_ui.eq_high_q;
 
+        // Prepare cabinet handles/data for the shared panel (UI thread only).
+        let cab_lib = self.cabinet_library.clone();
+        let cab_mailbox = self.cabinet_mailbox.clone();
+        let cab_sr = self.cabinet_sr.clone();
+        let cab_maxb = self.cabinet_max_block.clone();
+        let cab_err = self.cabinet_error.clone();
+        let cab_state = self.standalone_state.clone();
+        let cab_ir_list = cab_lib
+            .lock()
+            .ok()
+            .map(|l| l.list_irs().unwrap_or_default())
+            .unwrap_or_default();
+        let cab_active_hash = snap_ui.cab_active_hash.clone();
+        let cab_err_now = cab_err.lock().ok().and_then(|e| e.clone());
+        let cab_active = !snap_ui.cabinet_bypass;
+
         render_shared_panels(
             ctx,
             &mut self.active_panel,
@@ -990,6 +1189,7 @@ impl eframe::App for StandaloneApp {
             FFT_SIZE,
             snap_ui.eq_active,
             snap_ui.neural_active,
+            cab_active,
             snap_ui.bypass,
             || {
                 if let Ok(mut st) = self.standalone_state.lock() {
@@ -999,6 +1199,11 @@ impl eframe::App for StandaloneApp {
             || {
                 if let Ok(mut st) = self.standalone_state.lock() {
                     st.neural_active = !snap_ui.neural_active;
+                }
+            },
+            || {
+                if let Ok(mut st) = self.standalone_state.lock() {
+                    st.cabinet_bypass = !snap_ui.cabinet_bypass;
                 }
             },
             |ui| {
@@ -1077,6 +1282,130 @@ impl eframe::App for StandaloneApp {
                         st.gain               = ui_gain;
                     }
                 }
+            },
+            |ui| {
+                // Build a runtime and, only on success, hand it to the audio thread.
+                // Returns whether the build succeeded so callers gate persistence on it
+                // (B6: never persist a broken selection).
+                let build_and_publish = |bytes: &[u8]| -> bool {
+                    let srate = cab_sr.load(Ordering::Relaxed) as f32;
+                    let maxb = cab_maxb.load(Ordering::Relaxed);
+                    match CabinetRuntime::build(bytes, srate, maxb) {
+                        Ok(rt) => {
+                            cab_mailbox.publish(rt);
+                            if let Ok(mut e) = cab_err.lock() { *e = None; }
+                            true
+                        }
+                        Err(err) => {
+                            if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                            false
+                        }
+                    }
+                };
+
+                distortion::core::ui::draw_cabinet_panel(
+                    ui,
+                    &cab_ir_list,
+                    &cab_active_hash,
+                    cab_err_now.as_deref(),
+                    || snap_ui.cabinet_bypass,
+                    |v| { if let Ok(mut st) = cab_state.lock() { st.cabinet_bypass = v; } },
+                    || snap_ui.cabinet_level,
+                    |v| { if let Ok(mut st) = cab_state.lock() { st.cabinet_level = v; } },
+                    || snap_ui.cabinet_mix,
+                    |v| { if let Ok(mut st) = cab_state.lock() { st.cabinet_mix = v; } },
+                    // select_ir — build first, persist selection only on success.
+                    |hash: String| {
+                        let bytes = match cab_lib.lock() {
+                            Ok(l) => match l.get_ir_by_hash(&hash) {
+                                Ok((_, b)) => Some(b),
+                                Err(err) => {
+                                    if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                    None
+                                }
+                            },
+                            Err(_) => None,
+                        };
+                        if let Some(b) = bytes {
+                            if build_and_publish(&b) {
+                                if let Ok(l) = cab_lib.lock() { let _ = l.set_selected_hash(&hash); }
+                                if let Ok(mut st) = cab_state.lock() { st.cab_active_hash = hash.clone(); }
+                                save_persisted_hash(&hash);
+                            }
+                        }
+                    },
+                    // import_ir — store, then build; persist selection only on success.
+                    || {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("WAV", &["wav"])
+                            .pick_file()
+                        {
+                            match std::fs::read(&path) {
+                                Ok(bytes) => {
+                                    let fname = path
+                                        .file_name()
+                                        .and_then(|s| s.to_str())
+                                        .unwrap_or("imported.wav")
+                                        .to_string();
+                                    let imported = cab_lib.lock().ok().and_then(|l| {
+                                        match l.import_ir(&bytes, &fname) {
+                                            Ok(meta) => Some(meta.content_hash),
+                                            Err(err) => {
+                                                if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                                None
+                                            }
+                                        }
+                                    });
+                                    if let Some(hash) = imported {
+                                        if build_and_publish(&bytes) {
+                                            if let Ok(l) = cab_lib.lock() { let _ = l.set_selected_hash(&hash); }
+                                            if let Ok(mut st) = cab_state.lock() { st.cab_active_hash = hash.clone(); }
+                                            save_persisted_hash(&hash);
+                                        }
+                                    }
+                                }
+                                Err(err) => {
+                                    if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                }
+                            }
+                        }
+                    },
+                    // delete_ir
+                    |hash: String| {
+                        if let Ok(l) = cab_lib.lock() { let _ = l.delete_ir(&hash); }
+                        let was_active = cab_state
+                            .lock()
+                            .map(|st| st.cab_active_hash == hash)
+                            .unwrap_or(false);
+                        if was_active {
+                            if let Ok(mut st) = cab_state.lock() { st.cab_active_hash.clear(); }
+                            save_persisted_hash("");
+                            cab_mailbox.clear();
+                        }
+                    },
+                    // rename_ir
+                    |hash: String, name: String| {
+                        if let Ok(l) = cab_lib.lock() { let _ = l.rename_ir(&hash, &name); }
+                    },
+                    // export_ir
+                    |hash: String| {
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter("WAV", &["wav"])
+                            .set_file_name("cabinet_ir.wav")
+                            .save_file()
+                        {
+                            let bytes = cab_lib
+                                .lock()
+                                .ok()
+                                .and_then(|l| l.get_ir_by_hash(&hash).ok().map(|(_, b)| b));
+                            if let Some(b) = bytes {
+                                if let Err(err) = std::fs::write(&path, &b) {
+                                    if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                }
+                            }
+                        }
+                    },
+                );
             },
         );
     }

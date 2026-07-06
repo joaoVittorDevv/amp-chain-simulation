@@ -6,6 +6,7 @@ pub enum ActivePanel {
     None,
     EQ,
     NeuralAmp,
+    Cabinet,
 }
 
 pub fn draw_signal_chain(
@@ -13,9 +14,11 @@ pub fn draw_signal_chain(
     active_panel: &mut ActivePanel,
     eq_active: bool,
     neural_active: bool,
+    cabinet_active: bool,
     global_bypass: bool,
     mut on_eq_toggle: impl FnMut(),
     mut on_neural_toggle: impl FnMut(),
+    mut on_cabinet_toggle: impl FnMut(),
 ) {
     let (rect, _response) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), 60.0),
@@ -119,9 +122,12 @@ pub fn draw_signal_chain(
         (response.clicked(), power_resp.clicked())
     };
 
+    // Three processing nodes placed at n/4 of the span (n = 1,2,3); the final
+    // quarter (the line's right end) is the OUTPUT terminus and isn't a node.
     let total_span = end_x - start_x;
-    let eq_x = start_x + total_span * 0.33;
-    let neural_x = start_x + total_span * 0.67;
+    let eq_x = start_x + total_span * 0.25;
+    let neural_x = start_x + total_span * 0.50;
+    let cabinet_x = start_x + total_span * 0.75;
 
     // Draw nodes
     let (eq_clicked, eq_power_clicked) = draw_node(
@@ -144,6 +150,16 @@ pub fn draw_signal_chain(
         neural_active,
     );
 
+    let (cabinet_clicked, cabinet_power_clicked) = draw_node(
+        &painter,
+        ui,
+        cabinet_x,
+        "CABINET",
+        "cabinet_node",
+        *active_panel == ActivePanel::Cabinet,
+        cabinet_active,
+    );
+
     if eq_power_clicked {
         on_eq_toggle();
     } else if eq_clicked {
@@ -161,6 +177,16 @@ pub fn draw_signal_chain(
             ActivePanel::None
         } else {
             ActivePanel::NeuralAmp
+        };
+    }
+
+    if cabinet_power_clicked {
+        on_cabinet_toggle();
+    } else if cabinet_clicked {
+        *active_panel = if *active_panel == ActivePanel::Cabinet {
+            ActivePanel::None
+        } else {
+            ActivePanel::Cabinet
         };
     }
 }
