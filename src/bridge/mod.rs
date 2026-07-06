@@ -1,6 +1,5 @@
 pub mod faust;
 pub mod mojo;
-pub mod wavenet;
 
 /// Trait comum para Processadores de Áudio Externos (Zero-Copy)
 pub trait ExternalProcessor {
