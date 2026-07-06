@@ -56,7 +56,7 @@ fn open_cabinet_library() -> CabinetLibrary {
 }
 
 // ─── DSP agora é conduzido por Mojo (Zero-Copy FFI) ─────────────────────────
-// Não há mais inferência ONNX via tract-onnx nem thread de background.
+// Não há mais inferência neural em background.
 
 // --- BASE CONFIG (TEMPLATE SCAFFOLDING) ---
 pub const APP_NAME: &str = "Distortion";
@@ -74,7 +74,7 @@ pub struct BaseIO {
     analyzer_producer: Producer<f32>,
 
     faust: [Option<FaustProcessor>; 2],
-    /// Processador neural principal — substitui tract-onnx/ONNX.
+    /// Processador neural principal.
     /// Executa saturação suave (tanh) in-place via FFI Zero-Copy.
     mojo: [Option<MojoProcessor>; 2],
     pre_eq_convolver: [Option<FFTConvolver<f32>>; 2],

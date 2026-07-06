@@ -1,0 +1,18 @@
+{
+  "tasks": {
+    "cabinet-ir": {
+      "id": "cabinet-ir",
+      "branch": "polly/cabinet-ir",
+      "worktree": ".worktrees/cabinet-ir",
+      "implementer": {
+        "agent": "claude_code",
+        "conversation_id": "conv_f9e5ea46a1c34bd58e48ec7b77d856e9",
+        "title": "cabinet-ir"
+      },
+      "reviewers": [],
+      "pr_url": null,
+      "status": "implementing",
+      "round": 0
+    }
+  }
+}

@@ -62,7 +62,7 @@ pub fn render_shared_panels(
                         });
                     }
                     ActivePanel::NeuralAmp => {
-                        ui.heading("🧠 Neural Amp (PyTorch)");
+                        ui.heading("🧠 Neural Amp (Mojo)");
                         ui.separator();
                         ui.horizontal_wrapped(|ui| {
                             draw_neural_controls(ui);

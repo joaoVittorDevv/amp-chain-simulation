@@ -1,0 +1,100 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 8b9fe64..376890b 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -302,10 +302,20 @@ use egui_knob::{Knob, KnobStyle};
+         let input_mode   = self.params.input_select.value();
+         let bypass       = self.params.bypass.value();
+         
++        let gain                = self.params.gain.smoothed.next();
+         let neural_vol          = self.params.neural_amp_volume.smoothed.next();
+         let neural_drive        = self.params.neural_drive.smoothed.next();
+         let neural_output_gain  = self.params.neural_output_gain.smoothed.next();
+         let neural_active       = self.params.neural_amp_active.value();
++        let eq_low_freq         = self.params.eq_low_freq.smoothed.next();
++        let eq_low_gain         = self.params.eq_low_gain.smoothed.next();
++        let eq_low_q            = self.params.eq_low_q.smoothed.next();
++        let eq_mid_freq         = self.params.eq_mid_freq.smoothed.next();
++        let eq_mid_gain         = self.params.eq_mid_gain.smoothed.next();
++        let eq_mid_q            = self.params.eq_mid_q.smoothed.next();
++        let eq_high_freq        = self.params.eq_high_freq.smoothed.next();
++        let eq_high_gain        = self.params.eq_high_gain.smoothed.next();
++        let eq_high_q           = self.params.eq_high_q.smoothed.next();
+ 
+         // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
+         _context.set_latency_samples(0);
+@@ -342,21 +352,21 @@ use egui_knob::{Knob, KnobStyle};
+                 if self.params.eq_active.value() {
+                     if let Some(faust) = &mut self.faust[safe_idx] {
+                         faust.set_eq_params(
+-                            self.params.eq_low_freq.smoothed.next(),
+-                            self.params.eq_low_gain.smoothed.next(),
+-                            self.params.eq_low_q.smoothed.next(),
+-                            self.params.eq_mid_freq.smoothed.next(),
+-                            self.params.eq_mid_gain.smoothed.next(),
+-                            self.params.eq_mid_q.smoothed.next(),
+-                            self.params.eq_high_freq.smoothed.next(),
+-                            self.params.eq_high_gain.smoothed.next(),
+-                            self.params.eq_high_q.smoothed.next(),
++                            eq_low_freq,
++                            eq_low_gain,
++                            eq_low_q,
++                            eq_mid_freq,
++                            eq_mid_gain,
++                            eq_mid_q,
++                            eq_high_freq,
++                            eq_high_gain,
++                            eq_high_q,
+                         );
+                         faust.process_block(channel_samples.as_mut_ptr(), len);
+                     }
+                 }
+ 
+-                // ESTÁGIO 2: PRÉ-EQUALIZAÇÃO LTI (Pre-EQ Convolver)
++                // PRÉ-EQUALIZAÇÃO LTI (Pre-EQ Convolver)
+                 if let Some(pre_eq) = &mut self.pre_eq_convolver[safe_idx] {
+                     self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
+                     if pre_eq.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
+@@ -364,7 +374,7 @@ use egui_knob::{Knob, KnobStyle};
+                     }
+                 }
+ 
+-                // ESTÁGIO 3: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
++                // ESTÁGIO 2: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
+                 if neural_active {
+                     if let Some(mojo) = &mut self.mojo[safe_idx] {
+                         mojo.set_drive(neural_drive);
+@@ -373,7 +383,7 @@ use egui_knob::{Knob, KnobStyle};
+                     }
+                 }
+ 
+-                // ESTÁGIO 4: GABINETE (Cabinet IR Convolver)
++                // ESTÁGIO 3: GABINETE (Cabinet IR Convolver)
+                 if let Some(cabinet) = &mut self.cabinet_convolver[safe_idx] {
+                     self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
+                     if cabinet.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
+@@ -381,13 +391,12 @@ use egui_knob::{Knob, KnobStyle};
+                     }
+                 }
+ 
+-                // ESTÁGIO 5: Ganho Master
+-                let gain = self.params.gain.smoothed.next();
++                // ESTÁGIO 4: Ganho Master
+                 for sample in channel_samples.iter_mut() {
+                     *sample *= gain;
+                 }
+ 
+-                // ESTÁGIO 6: Volume Master Neural (após processamento)
++                // ESTÁGIO 5: Volume Master Neural (após processamento)
+                 if neural_active {
+                     for sample in channel_samples.iter_mut() {
+                         *sample *= neural_vol;
+@@ -395,7 +404,7 @@ use egui_knob::{Knob, KnobStyle};
+                 }
+             }
+ 
+-            // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
++            // ESTÁGIO 6: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+             for sample in channel_samples.iter_mut() {
+                 if sample.is_nan() || sample.is_infinite() {
+                     *sample = 0.0;
