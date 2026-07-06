@@ -1,6 +1,7 @@
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui};
 use rtrb::{Consumer, Producer, RingBuffer};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use fft_convolver::FFTConvolver;
 
@@ -9,7 +10,28 @@ pub mod bridge;
 
 use crate::core::{dsp, ui};
 use crate::core::ui::ActivePanel;
+use crate::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetRuntime};
 use crate::bridge::{ExternalProcessor, faust::FaustProcessor, mojo::MojoProcessor};
+
+/// Default cabinet IR embedded in the binary, used to seed an empty library on
+/// first run. Replaces the old hardcoded absolute path.
+const DEFAULT_CABINET_IR: &[u8] = include_bytes!("../neural/drive/cabinet_ir.wav");
+
+/// Open the shared cabinet IR library at `dirs::data_dir()/distortion`, falling
+/// back to an in-memory DB if the on-disk location is unavailable. Seeds the
+/// embedded default IR when the library is empty.
+fn open_cabinet_library() -> CabinetLibrary {
+    let lib = dirs::data_dir()
+        .map(|d| d.join("distortion"))
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            CabinetLibrary::new(&dir.join("cabinet_irs.db")).ok()
+        })
+        .or_else(|| CabinetLibrary::new(std::path::Path::new(":memory:")).ok())
+        .expect("failed to open cabinet library (even in-memory)");
+    let _ = lib.seed_default_ir(DEFAULT_CABINET_IR);
+    lib
+}
 
 // ─── DSP agora é conduzido por Mojo (Zero-Copy FFI) ─────────────────────────
 // Não há mais inferência ONNX via tract-onnx nem thread de background.
@@ -34,8 +56,17 @@ pub struct BaseIO {
     /// Executa saturação suave (tanh) in-place via FFI Zero-Copy.
     mojo: [Option<MojoProcessor>; 2],
     pre_eq_convolver: [Option<FFTConvolver<f32>>; 2],
-    cabinet_convolver: [Option<FFTConvolver<f32>>; 2],
     temp_buffer: Vec<f32>,
+
+    // --- Cabinet IR ---
+    cabinet_engine: CabinetEngine,
+    cabinet_library: Arc<Mutex<CabinetLibrary>>,
+    cabinet_scratch_l: Vec<f32>,
+    cabinet_scratch_r: Vec<f32>,
+    /// Shared with the editor so runtimes are built with the live engine rate.
+    cabinet_sr: Arc<AtomicU32>,
+    cabinet_max_block: Arc<AtomicUsize>,
+    cabinet_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for BaseIO {
@@ -49,8 +80,15 @@ impl Default for BaseIO {
             faust: [FaustProcessor::new(), FaustProcessor::new()],
             mojo: [Some(MojoProcessor::new()), Some(MojoProcessor::new())],
             pre_eq_convolver: [None, None],
-            cabinet_convolver: [None, None],
             temp_buffer: Vec::new(),
+
+            cabinet_engine: CabinetEngine::new(),
+            cabinet_library: Arc::new(Mutex::new(open_cabinet_library())),
+            cabinet_scratch_l: Vec::new(),
+            cabinet_scratch_r: Vec::new(),
+            cabinet_sr: Arc::new(AtomicU32::new(48_000)),
+            cabinet_max_block: Arc::new(AtomicUsize::new(512)),
+            cabinet_error: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -91,6 +129,11 @@ impl Plugin for BaseIO {
                 analyzer: dsp::AnalyzerDsp::default(),
                 consumer: consumer_mutex,
                 active_panel: ActivePanel::None,
+                cabinet_library: self.cabinet_library.clone(),
+                cabinet_mailbox: self.cabinet_engine.mailbox(),
+                cabinet_sr: self.cabinet_sr.clone(),
+                cabinet_max_block: self.cabinet_max_block.clone(),
+                cabinet_error: self.cabinet_error.clone(),
             },
             |_, _| {},
             move |egui_ctx, setter, state| {
@@ -177,6 +220,29 @@ use egui_knob::{Knob, KnobStyle};
                     response
                 };
 
+                // Drop any parked (old) cabinet runtime on this UI thread.
+                state.cabinet_mailbox.collect_garbage();
+
+                let cab_bypass_now = state.params.cabinet_bypass.value();
+                let cab_active = !cab_bypass_now;
+                let cab_lib = state.cabinet_library.clone();
+                let cab_mailbox = state.cabinet_mailbox.clone();
+                let cab_sr = state.cabinet_sr.clone();
+                let cab_maxb = state.cabinet_max_block.clone();
+                let cab_err = state.cabinet_error.clone();
+                let cab_ir_list = cab_lib
+                    .lock()
+                    .ok()
+                    .map(|l| l.list_irs().unwrap_or_default())
+                    .unwrap_or_default();
+                let cab_active_hash = state
+                    .params
+                    .cab_active_hash
+                    .read()
+                    .map(|g| g.clone())
+                    .unwrap_or_default();
+                let cab_err_now = cab_err.lock().ok().and_then(|e| e.clone());
+
                 ui::render_shared_panels(
                     egui_ctx,
                     &mut state.active_panel,
@@ -184,6 +250,7 @@ use egui_knob::{Knob, KnobStyle};
                     dsp::FFT_SIZE,
                     eq_active,
                     n_active,
+                    cab_active,
                     g_bypass,
                     || {
                         setter.begin_set_parameter(&state.params.eq_active);
@@ -194,6 +261,11 @@ use egui_knob::{Knob, KnobStyle};
                         setter.begin_set_parameter(&state.params.neural_amp_active);
                         setter.set_parameter(&state.params.neural_amp_active, !n_active);
                         setter.end_set_parameter(&state.params.neural_amp_active);
+                    },
+                    || {
+                        setter.begin_set_parameter(&state.params.cabinet_bypass);
+                        setter.set_parameter(&state.params.cabinet_bypass, !cab_bypass_now);
+                        setter.end_set_parameter(&state.params.cabinet_bypass);
                     },
                     |ui| {
                         ui.columns(3, |columns| {
@@ -231,6 +303,144 @@ use egui_knob::{Knob, KnobStyle};
                                 make_knob(ui, &state.params.neural_amp_volume);
                             });
                         });
+                    },
+                    |ui| {
+                        // Helper to (re)build a runtime for `hash` and hand it to the audio thread.
+                        let build_and_publish = |hash: &str, bytes: &[u8]| {
+                            let srate = cab_sr.load(Ordering::Relaxed) as f32;
+                            let maxb = cab_maxb.load(Ordering::Relaxed);
+                            match CabinetRuntime::build(bytes, srate, maxb) {
+                                Ok(rt) => {
+                                    cab_mailbox.publish(rt);
+                                    if let Ok(mut e) = cab_err.lock() { *e = None; }
+                                }
+                                Err(err) => {
+                                    if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                }
+                            }
+                            let _ = hash;
+                        };
+
+                        crate::core::ui::draw_cabinet_panel(
+                            ui,
+                            &cab_ir_list,
+                            &cab_active_hash,
+                            cab_err_now.as_deref(),
+                            || state.params.cabinet_bypass.value(),
+                            |v| {
+                                setter.begin_set_parameter(&state.params.cabinet_bypass);
+                                setter.set_parameter(&state.params.cabinet_bypass, v);
+                                setter.end_set_parameter(&state.params.cabinet_bypass);
+                            },
+                            || state.params.cabinet_level.value(),
+                            |v| {
+                                setter.begin_set_parameter(&state.params.cabinet_level);
+                                setter.set_parameter(&state.params.cabinet_level, v);
+                                setter.end_set_parameter(&state.params.cabinet_level);
+                            },
+                            || state.params.cabinet_mix.value(),
+                            |v| {
+                                setter.begin_set_parameter(&state.params.cabinet_mix);
+                                setter.set_parameter(&state.params.cabinet_mix, v);
+                                setter.end_set_parameter(&state.params.cabinet_mix);
+                            },
+                            // select_ir
+                            |hash: String| {
+                                let bytes = match cab_lib.lock() {
+                                    Ok(l) => match l.get_ir_by_hash(&hash) {
+                                        Ok((_, b)) => {
+                                            let _ = l.set_selected_hash(&hash);
+                                            Some(b)
+                                        }
+                                        Err(err) => {
+                                            if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                            None
+                                        }
+                                    },
+                                    Err(_) => None,
+                                };
+                                if let Some(b) = bytes {
+                                    if let Ok(mut g) = state.params.cab_active_hash.write() { *g = hash.clone(); }
+                                    build_and_publish(&hash, &b);
+                                }
+                            },
+                            // import_ir
+                            || {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("WAV", &["wav"])
+                                    .pick_file()
+                                {
+                                    match std::fs::read(&path) {
+                                        Ok(bytes) => {
+                                            let fname = path
+                                                .file_name()
+                                                .and_then(|s| s.to_str())
+                                                .unwrap_or("imported.wav")
+                                                .to_string();
+                                            let imported = cab_lib.lock().ok().and_then(|l| {
+                                                match l.import_ir(&bytes, &fname) {
+                                                    Ok(meta) => {
+                                                        let _ = l.set_selected_hash(&meta.content_hash);
+                                                        Some(meta.content_hash)
+                                                    }
+                                                    Err(err) => {
+                                                        if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                                        None
+                                                    }
+                                                }
+                                            });
+                                            if let Some(hash) = imported {
+                                                if let Ok(mut g) = state.params.cab_active_hash.write() { *g = hash.clone(); }
+                                                build_and_publish(&hash, &bytes);
+                                            }
+                                        }
+                                        Err(err) => {
+                                            if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                        }
+                                    }
+                                }
+                            },
+                            // delete_ir
+                            |hash: String| {
+                                if let Ok(l) = cab_lib.lock() {
+                                    let _ = l.delete_ir(&hash);
+                                }
+                                if state
+                                    .params
+                                    .cab_active_hash
+                                    .read()
+                                    .map(|g| *g == hash)
+                                    .unwrap_or(false)
+                                {
+                                    if let Ok(mut g) = state.params.cab_active_hash.write() { g.clear(); }
+                                    cab_mailbox.clear();
+                                }
+                            },
+                            // rename_ir
+                            |hash: String, name: String| {
+                                if let Ok(l) = cab_lib.lock() {
+                                    let _ = l.rename_ir(&hash, &name);
+                                }
+                            },
+                            // export_ir
+                            |hash: String| {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("WAV", &["wav"])
+                                    .set_file_name("cabinet_ir.wav")
+                                    .save_file()
+                                {
+                                    let bytes = cab_lib
+                                        .lock()
+                                        .ok()
+                                        .and_then(|l| l.get_ir_by_hash(&hash).ok().map(|(_, b)| b));
+                                    if let Some(b) = bytes {
+                                        if let Err(err) = std::fs::write(&path, &b) {
+                                            if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                        }
+                                    }
+                                }
+                            },
+                        );
                     },
                 );
             }
@@ -275,18 +485,41 @@ use egui_knob::{Knob, KnobStyle};
             }
         }
 
-        // 2. Carregar a Caixa (Cabinet)
-        let cab_path = format!("{}{}", base_path, "cabinet_ir.wav");
-        if let Some(ir_samples) = load_ir(&cab_path) {
-            let mut conv_l = FFTConvolver::default();
-            let mut conv_r = FFTConvolver::default();
-            if !ir_samples.is_empty() && conv_l.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() &&
-               conv_r.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() {
-                self.cabinet_convolver = [Some(conv_l), Some(conv_r)];
+        // 2. Cabinet IR: managed via CabinetLibrary + CabinetEngine (no hardcoded path).
+        let max_block = buffer_config.max_buffer_size as usize;
+        self.temp_buffer.resize(max_block, 0.0);
+        self.cabinet_scratch_l.resize(max_block, 0.0);
+        self.cabinet_scratch_r.resize(max_block, 0.0);
+
+        self.cabinet_engine.set_sample_rate(sample_rate);
+        self.cabinet_sr.store(sample_rate as u32, Ordering::Relaxed);
+        self.cabinet_max_block.store(max_block, Ordering::Relaxed);
+
+        // Resolve the active IR: prefer the persisted per-project hash, otherwise
+        // fall back to the library's stored selection (the seeded default IR).
+        let mut active_hash = self
+            .params
+            .cab_active_hash
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        if let Ok(lib) = self.cabinet_library.lock() {
+            if active_hash.is_empty() {
+                active_hash = lib.get_selected_hash().ok().flatten().unwrap_or_default();
+                if let Ok(mut g) = self.params.cab_active_hash.write() {
+                    *g = active_hash.clone();
+                }
+            }
+            if !active_hash.is_empty() {
+                match lib.get_ir_by_hash(&active_hash) {
+                    Ok((_, bytes)) => match CabinetRuntime::build(&bytes, sample_rate, max_block) {
+                        Ok(rt) => self.cabinet_engine.load_runtime(rt),
+                        Err(e) => nih_log!("Cabinet runtime build failed: {}", e),
+                    },
+                    Err(e) => nih_log!("Cabinet IR resolve failed: {}", e),
+                }
             }
         }
-
-        self.temp_buffer.resize(buffer_config.max_buffer_size as usize, 0.0);
 
         true
     }
@@ -317,6 +550,9 @@ use egui_knob::{Knob, KnobStyle};
         let eq_high_freq        = self.params.eq_high_freq.smoothed.next();
         let eq_high_gain        = self.params.eq_high_gain.smoothed.next();
         let eq_high_q           = self.params.eq_high_q.smoothed.next();
+        let cab_bypass          = self.params.cabinet_bypass.value();
+        let cab_level           = self.params.cabinet_level.smoothed.next();
+        let cab_mix             = self.params.cabinet_mix.smoothed.next();
 
         // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
         _context.set_latency_samples(0);
@@ -343,12 +579,12 @@ use egui_knob::{Knob, KnobStyle};
         // Recuperar referências slice-based do buffer do nih-plug para FFI zero-copy!
         let buffer_slices = buffer.as_slice();
 
-        // Processamento UNIFICADO (single-pass) seguindo o padrão do standalone
-        for (channel_idx, channel_samples) in buffer_slices.iter_mut().enumerate() {
-            let len = channel_samples.len();
-            let safe_idx = channel_idx.min(1);
+        if !bypass {
+            // ESTÁGIOS 1-3 (per-channel): Faust EQ → Pré-EQ → Neural drive
+            for (channel_idx, channel_samples) in buffer_slices.iter_mut().enumerate() {
+                let len = channel_samples.len();
+                let safe_idx = channel_idx.min(1);
 
-            if !bypass {
                 // ESTÁGIO 1: Faust EQ (3-band parametric)
                 if eq_active {
                     if let Some(faust) = &mut self.faust[safe_idx] {
@@ -383,29 +619,54 @@ use egui_knob::{Knob, KnobStyle};
                         mojo.process_block(channel_samples.as_mut_ptr(), len);
                     }
                 }
+            }
 
-                // ESTÁGIO 4: GABINETE (Cabinet IR Convolver)
-                if let Some(cabinet) = &mut self.cabinet_convolver[safe_idx] {
-                    self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
-                    if cabinet.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
-                        channel_samples[..len].copy_from_slice(&self.temp_buffer[..len]);
-                    }
+            // ESTÁGIO 4: GABINETE (Cabinet IR — troca em runtime via ArcSwap).
+            // Processado em stereo para manter rampa/crossfade coerente entre L/R.
+            let len = buffer_slices.first().map_or(0, |c| c.len());
+            if len > 0 {
+                if buffer_slices.len() >= 2 {
+                    let (l_part, r_part) = buffer_slices.split_at_mut(1);
+                    self.cabinet_engine.process(
+                        l_part[0],
+                        r_part[0],
+                        &mut self.cabinet_scratch_l[..len],
+                        &mut self.cabinet_scratch_r[..len],
+                        cab_bypass,
+                        cab_level,
+                        cab_mix,
+                    );
+                } else {
+                    // Mono host (never hit under the enforced stereo layout, but kept
+                    // sound): feed the single channel as L and a throwaway mirror as R.
+                    self.temp_buffer[..len].copy_from_slice(&buffer_slices[0][..len]);
+                    self.cabinet_engine.process(
+                        &mut buffer_slices[0][..len],
+                        &mut self.temp_buffer[..len],
+                        &mut self.cabinet_scratch_l[..len],
+                        &mut self.cabinet_scratch_r[..len],
+                        cab_bypass,
+                        cab_level,
+                        cab_mix,
+                    );
                 }
+            }
 
-                // ESTÁGIO 5: Ganho Master
+            // ESTÁGIOS 5-6 (per-channel): Ganho Master → Volume Master Neural
+            for channel_samples in buffer_slices.iter_mut() {
                 for sample in channel_samples.iter_mut() {
                     *sample *= gain;
                 }
-
-                // ESTÁGIO 6: Volume Master Neural (após processamento)
                 if neural_active {
                     for sample in channel_samples.iter_mut() {
                         *sample *= neural_vol;
                     }
                 }
             }
+        }
 
-            // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+        // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
+        for channel_samples in buffer_slices.iter_mut() {
             for sample in channel_samples.iter_mut() {
                 if sample.is_nan() || sample.is_infinite() {
                     *sample = 0.0;

@@ -41,6 +41,21 @@ pub struct BaseIOParams {
     #[id = "neural_amp_active"]
     pub neural_amp_active: BoolParam,
 
+    // --- Cabinet IR ---
+    #[id = "cab_bypass"]
+    pub cabinet_bypass: BoolParam,
+
+    #[id = "cab_level"]
+    pub cabinet_level: FloatParam,
+
+    #[id = "cab_mix"]
+    pub cabinet_mix: FloatParam,
+
+    /// Content hash of the selected cabinet IR (empty = none). Not automatable;
+    /// persisted per DAW project so the selection survives reload.
+    #[persist = "cab_active_hash"]
+    pub cab_active_hash: std::sync::RwLock<String>,
+
     // --- Parametric EQ ---
     #[id = "eq_active"]
     pub eq_active: BoolParam,
@@ -72,6 +87,16 @@ pub struct EditorState {
     pub analyzer: dsp::AnalyzerDsp,
     pub consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     pub active_panel: crate::core::ui::ActivePanel,
+
+    // --- Cabinet IR (UI-thread only) ---
+    pub cabinet_library: Arc<Mutex<crate::core::cabinet::CabinetLibrary>>,
+    pub cabinet_mailbox: Arc<crate::core::cabinet::CabinetMailbox>,
+    /// Current engine sample rate (Hz), kept fresh by `initialize()`.
+    pub cabinet_sr: Arc<std::sync::atomic::AtomicU32>,
+    /// Current engine max block size, kept fresh by `initialize()`.
+    pub cabinet_max_block: Arc<std::sync::atomic::AtomicUsize>,
+    /// Last import/decode error, shown in the panel until the next successful op.
+    pub cabinet_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for BaseIOParams {
@@ -141,6 +166,35 @@ impl Default for BaseIOParams {
         .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
         neural_amp_active: BoolParam::new("Neural Amp Active", true),
+
+        // --- Cabinet IR defaults ---
+        cabinet_bypass: BoolParam::new("Cabinet Bypass", false),
+
+        cabinet_level: FloatParam::new(
+            "Cabinet Level",
+            util::db_to_gain(0.0),
+            FloatRange::Skewed {
+                min: util::db_to_gain(-24.0),
+                max: util::db_to_gain(12.0),
+                factor: FloatRange::gain_skew_factor(-24.0, 12.0),
+            },
+        )
+        .with_smoother(SmoothingStyle::Logarithmic(50.0))
+        .with_unit(" dB")
+        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+
+        cabinet_mix: FloatParam::new(
+            "Cabinet Mix",
+            1.0,
+            FloatRange::Linear { min: 0.0, max: 1.0 },
+        )
+        .with_smoother(SmoothingStyle::Linear(50.0))
+        .with_unit(" %")
+        .with_value_to_string(formatters::v2s_f32_percentage(0))
+        .with_string_to_value(formatters::s2v_f32_percentage()),
+
+        cab_active_hash: std::sync::RwLock::new(String::new()),
 
         // --- EQ Defaults ---
         eq_active: BoolParam::new("EQ Active", true),
