@@ -22,7 +22,18 @@ impl FaustProcessor {
         }
     }
 
-    pub fn set_eq_params(&mut self, low_f: f32, low_g: f32, low_q: f32, mid_f: f32, mid_g: f32, mid_q: f32, high_f: f32, high_g: f32, high_q: f32) {
+    pub fn set_eq_params(
+        &mut self,
+        low_f: f32,
+        low_g: f32,
+        low_q: f32,
+        mid_f: f32,
+        mid_g: f32,
+        mid_q: f32,
+        high_f: f32,
+        high_g: f32,
+        high_q: f32,
+    ) {
         unsafe {
             faust_set_eq_low_freq(self.handle, low_f);
             faust_set_eq_low_gain(self.handle, low_g);
@@ -35,6 +46,12 @@ impl FaustProcessor {
             faust_set_eq_high_freq(self.handle, high_f);
             faust_set_eq_high_gain(self.handle, high_g);
             faust_set_eq_high_q(self.handle, high_q);
+        }
+    }
+
+    pub fn set_eq_tanh_bypass(&mut self, bypass: bool) {
+        unsafe {
+            faust_set_eq_tanh_bypass(self.handle, if bypass { 1.0 } else { 0.0 });
         }
     }
 }

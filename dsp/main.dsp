@@ -23,8 +23,11 @@ g3 = hslider("EQ High Gain [unit:dB]", 0, -12, 12, 0.1) : si.smoo;
 q3 = hslider("EQ High Q", 0.707, 0.707, 10, 0.01) : si.smoo;
 eq_high = filters.high_shelf(g3, f3, q3);
 
-// DSP Pipeline Estável (Cascata) com Soft Clipping (ma.tanh)
-eq_chain = eq_low : eq_mid : eq_high : ma.tanh;
+eq_tanh_bypass = checkbox("EQ Tanh Bypass");
+eq_sat(x) = x * eq_tanh_bypass + ma.tanh(x) * (1.0 - eq_tanh_bypass);
+
+// DSP Pipeline Estável (Cascata) com Soft Clipping opcional (ma.tanh)
+eq_chain = eq_low : eq_mid : eq_high : eq_sat;
 
 // Orquestração: Estéreo in/out
 process = _,_ : (eq_chain, eq_chain);

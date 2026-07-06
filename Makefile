@@ -1,4 +1,4 @@
-.PHONY: help init build run bundle clean build-faust build-mojo pre-build check-env
+.PHONY: help init build run bundle clean build-faust build-faust-mlc build-mojo pre-build check-env
 
 check-env:
 	@bash ./scripts/check_env.sh
@@ -42,6 +42,19 @@ build-faust:
 		echo "⚠️ Transpilador Faust não encontrado. Pulando etapa Faust."; \
 	fi
 
+build-faust-mlc:
+	@echo "🔨 Compilando Faust MLC ZERO V..."
+	@mkdir -p dsp
+	@if command -v faust >/dev/null 2>&1; then \
+		if [ -f dsp/mlc_zero_v.dsp ]; then \
+			faust -lang cpp -cn mlczerov -I faust-ddsp -i dsp/mlc_zero_v.dsp -o dsp/MlcZeroVModule.hpp; \
+		else \
+			echo "⚠️ dsp/mlc_zero_v.dsp não encontrado. Pulando etapa Faust MLC."; \
+		fi \
+	else \
+		echo "⚠️ Transpilador Faust não encontrado. Pulando etapa Faust MLC."; \
+	fi
+
 build-mojo:
 	@echo "🔨 Compilando arquivos Mojo..."
 	@mkdir -p neural
@@ -59,7 +72,7 @@ build-mojo:
 		echo "⚠️ Compilador Mojo não encontrado. Pulando etapa Mojo."; \
 	fi
 
-pre-build: check-env build-faust build-mojo
+pre-build: check-env build-faust build-faust-mlc build-mojo
 
 run: pre-build
 	./scripts/run_standalone.sh

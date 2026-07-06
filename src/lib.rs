@@ -1,17 +1,19 @@
+use fft_convolver::FFTConvolver;
 use nih_plug::prelude::*;
 use nih_plug_egui::{create_egui_editor, egui};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use fft_convolver::FFTConvolver;
 
-pub mod core;
 pub mod bridge;
+pub mod core;
 
-use crate::core::{dsp, ui};
-use crate::core::ui::ActivePanel;
+use crate::bridge::{
+    faust::FaustProcessor, mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, ExternalProcessor,
+};
 use crate::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetRuntime};
-use crate::bridge::{ExternalProcessor, faust::FaustProcessor, mojo::MojoProcessor};
+use crate::core::ui::ActivePanel;
+use crate::core::{dsp, ui};
 
 /// Default cabinet IR embedded in the binary, used to seed an empty library on
 /// first run. Replaces the old hardcoded absolute path.
@@ -64,9 +66,50 @@ pub const APP_ID: &str = "distortion";
 pub const VENDOR: &str = "";
 pub const APP_EMAIL: &str = "joaovittorh1@gmail.com";
 pub const CLAP_ID: &str = ".distortion";
-pub const VST3_ID: [u8; 16] = [0xA9, 0xED, 0x13, 0x81, 0x0D, 0xBC, 0x4A, 0x4A, 0x98, 0x54, 0x0F, 0x0F, 0x67, 0x1E, 0x9E, 0x1A];
+pub const VST3_ID: [u8; 16] = [
+    0xA9, 0xED, 0x13, 0x81, 0x0D, 0xBC, 0x4A, 0x4A, 0x98, 0x54, 0x0F, 0x0F, 0x67, 0x1E, 0x9E, 0x1A,
+];
 // ------------------------------------------
-use crate::core::state::plugin_params::{BaseIOParams, EditorState, InputSelect};
+use crate::core::state::plugin_params::{
+    AmpModel, BaseIOParams, EditorState, InputSelect, MlcBright, MlcFeedback, MlcGatePos,
+};
+
+const MAX_BLOCK: usize = 8192;
+const CROSSFADE_LEN: usize = 480;
+
+#[derive(Clone, Copy)]
+struct MlcBlockParams {
+    gain: f32,
+    master: f32,
+    bass: f32,
+    middle: f32,
+    treble: f32,
+    presence: f32,
+    depth: f32,
+    gate: f32,
+    bright: f32,
+    m45: bool,
+    warclaw: bool,
+    feedback: f32,
+    gate_pos: f32,
+}
+
+#[inline(always)]
+fn configure_mlc(mlc: &mut MlcZeroVProcessor, params: MlcBlockParams) {
+    mlc.set_gain(params.gain);
+    mlc.set_master(params.master);
+    mlc.set_bass(params.bass);
+    mlc.set_middle(params.middle);
+    mlc.set_treble(params.treble);
+    mlc.set_presence(params.presence);
+    mlc.set_depth(params.depth);
+    mlc.set_gate(params.gate);
+    mlc.set_bright(params.bright);
+    mlc.set_m45(params.m45);
+    mlc.set_warclaw(params.warclaw);
+    mlc.set_feedback(params.feedback);
+    mlc.set_gate_pos(params.gate_pos);
+}
 
 pub struct BaseIO {
     params: Arc<BaseIOParams>,
@@ -77,6 +120,10 @@ pub struct BaseIO {
     /// Processador neural principal.
     /// Executa saturação suave (tanh) in-place via FFI Zero-Copy.
     mojo: [Option<MojoProcessor>; 2],
+    mlc_zero_v: [Option<MlcZeroVProcessor>; 2],
+    previous_amp_model: AmpModel,
+    crossfade_sample: usize,
+    crossfade_buf: [[f32; MAX_BLOCK]; 2],
     pre_eq_convolver: [Option<FFTConvolver<f32>>; 2],
     temp_buffer: Vec<f32>,
 
@@ -94,13 +141,17 @@ pub struct BaseIO {
 impl Default for BaseIO {
     fn default() -> Self {
         let (producer, consumer) = RingBuffer::new(1024 * 64);
-        
+
         Self {
             params: Arc::new(BaseIOParams::default()),
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
             faust: [FaustProcessor::new(), FaustProcessor::new()],
             mojo: [Some(MojoProcessor::new()), Some(MojoProcessor::new())],
+            mlc_zero_v: [MlcZeroVProcessor::new(), MlcZeroVProcessor::new()],
+            previous_amp_model: AmpModel::Neural,
+            crossfade_sample: CROSSFADE_LEN,
+            crossfade_buf: [[0.0; MAX_BLOCK]; 2],
             pre_eq_convolver: [None, None],
             temp_buffer: Vec::new(),
 
@@ -172,10 +223,10 @@ impl Plugin for BaseIO {
                         ui.label(format!("{} Spectrum Analyzer", APP_NAME));
                         ui.separator();
                         ui.label("Input Source:");
-                        
+
                         let current_in = state.params.input_select.value();
                         let mut new_in = current_in;
-                        
+
                         egui::ComboBox::from_id_salt("input_selector")
                             .selected_text(match current_in {
                                 InputSelect::Stereo => "1/2 (Stereo)",
@@ -183,15 +234,53 @@ impl Plugin for BaseIO {
                                 InputSelect::Input2 => "Input 2 (Guitar)",
                             })
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut new_in, InputSelect::Stereo, "1/2 (Stereo)");
-                                ui.selectable_value(&mut new_in, InputSelect::Input1, "Input 1 (Mic)");
-                                ui.selectable_value(&mut new_in, InputSelect::Input2, "Input 2 (Guitar)");
+                                ui.selectable_value(
+                                    &mut new_in,
+                                    InputSelect::Stereo,
+                                    "1/2 (Stereo)",
+                                );
+                                ui.selectable_value(
+                                    &mut new_in,
+                                    InputSelect::Input1,
+                                    "Input 1 (Mic)",
+                                );
+                                ui.selectable_value(
+                                    &mut new_in,
+                                    InputSelect::Input2,
+                                    "Input 2 (Guitar)",
+                                );
                             });
 
                         if new_in != current_in {
                             setter.begin_set_parameter(&state.params.input_select);
                             setter.set_parameter(&state.params.input_select, new_in);
                             setter.end_set_parameter(&state.params.input_select);
+                        }
+
+                        ui.separator();
+                        ui.label("Amp:");
+
+                        let current_amp = state.params.amp_model.value();
+                        let mut new_amp = current_amp;
+
+                        egui::ComboBox::from_id_salt("amp_model_selector")
+                            .selected_text(match current_amp {
+                                AmpModel::Neural => "Neural",
+                                AmpModel::MlcZeroV => "MLC ZERO V",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut new_amp, AmpModel::Neural, "Neural");
+                                ui.selectable_value(&mut new_amp, AmpModel::MlcZeroV, "MLC ZERO V");
+                            });
+
+                        if new_amp != current_amp {
+                            setter.begin_set_parameter(&state.params.amp_model);
+                            setter.set_parameter(&state.params.amp_model, new_amp);
+                            setter.end_set_parameter(&state.params.amp_model);
+                            state.active_panel = match new_amp {
+                                AmpModel::Neural => ActivePanel::NeuralAmp,
+                                AmpModel::MlcZeroV => ActivePanel::MlcZeroV,
+                            };
                         }
 
                         ui.separator();
@@ -209,8 +298,9 @@ impl Plugin for BaseIO {
                 let n_active = state.params.neural_amp_active.value();
                 let eq_active = state.params.eq_active.value();
                 let g_bypass = state.params.bypass.value();
+                let amp_model = state.params.amp_model.value();
 
-use egui_knob::{Knob, KnobStyle};
+                use egui_knob::{Knob, KnobStyle};
 
                 let make_knob = |ui: &mut egui::Ui, param: &FloatParam| {
                     let mut value = param.value();
@@ -219,16 +309,9 @@ use egui_knob::{Knob, KnobStyle};
                         FloatRange::Skewed { min, max, .. } => (min, max),
                         _ => (0.0, 1.0),
                     };
-                    
-                    let response = ui.add(
-                        Knob::new(
-                            &mut value,
-                            min,
-                            max,
-                            KnobStyle::Wiper,
-                        )
-                        .with_size(45.0),
-                    );
+
+                    let response =
+                        ui.add(Knob::new(&mut value, min, max, KnobStyle::Wiper).with_size(45.0));
 
                     if response.drag_started() {
                         setter.begin_set_parameter(param);
@@ -274,6 +357,7 @@ use egui_knob::{Knob, KnobStyle};
                     n_active,
                     cab_active,
                     g_bypass,
+                    amp_model,
                     || {
                         setter.begin_set_parameter(&state.params.eq_active);
                         setter.set_parameter(&state.params.eq_active, !eq_active);
@@ -289,22 +373,63 @@ use egui_knob::{Knob, KnobStyle};
                         setter.set_parameter(&state.params.cabinet_bypass, !cab_bypass_now);
                         setter.end_set_parameter(&state.params.cabinet_bypass);
                     },
+                    || {
+                        setter.begin_set_parameter(&state.params.amp_model);
+                        setter.set_parameter(&state.params.amp_model, AmpModel::Neural);
+                        setter.end_set_parameter(&state.params.amp_model);
+                    },
+                    || {
+                        setter.begin_set_parameter(&state.params.amp_model);
+                        setter.set_parameter(&state.params.amp_model, AmpModel::MlcZeroV);
+                        setter.end_set_parameter(&state.params.amp_model);
+                    },
                     |ui| {
+                        let mut tanh_bypass = state.params.eq_tanh_bypass.value();
+                        if ui.checkbox(&mut tanh_bypass, "EQ Tanh Bypass").changed() {
+                            setter.begin_set_parameter(&state.params.eq_tanh_bypass);
+                            setter.set_parameter(&state.params.eq_tanh_bypass, tanh_bypass);
+                            setter.end_set_parameter(&state.params.eq_tanh_bypass);
+                        }
+                        ui.add_space(6.0);
                         ui.columns(3, |columns| {
-                            crate::core::ui::main_view::draw_eq_band(&mut columns[0], "BASS",
-                                |ui| { make_knob(ui, &state.params.eq_low_freq); },
-                                |ui| { make_knob(ui, &state.params.eq_low_gain); },
-                                |ui| { make_knob(ui, &state.params.eq_low_q); }
+                            crate::core::ui::main_view::draw_eq_band(
+                                &mut columns[0],
+                                "BASS",
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_low_freq);
+                                },
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_low_gain);
+                                },
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_low_q);
+                                },
                             );
-                            crate::core::ui::main_view::draw_eq_band(&mut columns[1], "MID",
-                                |ui| { make_knob(ui, &state.params.eq_mid_freq); },
-                                |ui| { make_knob(ui, &state.params.eq_mid_gain); },
-                                |ui| { make_knob(ui, &state.params.eq_mid_q); }
+                            crate::core::ui::main_view::draw_eq_band(
+                                &mut columns[1],
+                                "MID",
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_mid_freq);
+                                },
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_mid_gain);
+                                },
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_mid_q);
+                                },
                             );
-                            crate::core::ui::main_view::draw_eq_band(&mut columns[2], "TREBLE",
-                                |ui| { make_knob(ui, &state.params.eq_high_freq); },
-                                |ui| { make_knob(ui, &state.params.eq_high_gain); },
-                                |ui| { make_knob(ui, &state.params.eq_high_q); }
+                            crate::core::ui::main_view::draw_eq_band(
+                                &mut columns[2],
+                                "TREBLE",
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_high_freq);
+                                },
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_high_gain);
+                                },
+                                |ui| {
+                                    make_knob(ui, &state.params.eq_high_q);
+                                },
                             );
                         });
                     },
@@ -327,6 +452,9 @@ use egui_knob::{Knob, KnobStyle};
                         });
                     },
                     |ui| {
+                        crate::core::ui::draw_mlc_zero_v_panel(ui, setter, &state.params);
+                    },
+                    |ui| {
                         // Build a runtime and, only on success, hand it to the audio
                         // thread. Returns whether the build succeeded so callers can
                         // gate persistence on it (B6: never persist a broken selection).
@@ -336,11 +464,15 @@ use egui_knob::{Knob, KnobStyle};
                             match CabinetRuntime::build(bytes, srate, maxb) {
                                 Ok(rt) => {
                                     cab_mailbox.publish(rt);
-                                    if let Ok(mut e) = cab_err.lock() { *e = None; }
+                                    if let Ok(mut e) = cab_err.lock() {
+                                        *e = None;
+                                    }
                                     true
                                 }
                                 Err(err) => {
-                                    if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                    if let Ok(mut e) = cab_err.lock() {
+                                        *e = Some(err.to_string());
+                                    }
                                     false
                                 }
                             }
@@ -375,7 +507,9 @@ use egui_knob::{Knob, KnobStyle};
                                     Ok(l) => match l.get_ir_by_hash(&hash) {
                                         Ok((_, b)) => Some(b),
                                         Err(err) => {
-                                            if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                            if let Ok(mut e) = cab_err.lock() {
+                                                *e = Some(err.to_string());
+                                            }
                                             None
                                         }
                                     },
@@ -383,8 +517,12 @@ use egui_knob::{Knob, KnobStyle};
                                 };
                                 if let Some(b) = bytes {
                                     if build_and_publish(&b) {
-                                        if let Ok(l) = cab_lib.lock() { let _ = l.set_selected_hash(&hash); }
-                                        if let Ok(mut g) = state.params.cab_active_hash.write() { *g = hash.clone(); }
+                                        if let Ok(l) = cab_lib.lock() {
+                                            let _ = l.set_selected_hash(&hash);
+                                        }
+                                        if let Ok(mut g) = state.params.cab_active_hash.write() {
+                                            *g = hash.clone();
+                                        }
                                     }
                                 }
                             },
@@ -401,24 +539,35 @@ use egui_knob::{Knob, KnobStyle};
                                                 .and_then(|s| s.to_str())
                                                 .unwrap_or("imported.wav")
                                                 .to_string();
-                                            let imported = cab_lib.lock().ok().and_then(|l| {
-                                                match l.import_ir(&bytes, &fname) {
-                                                    Ok(meta) => Some(meta.content_hash),
-                                                    Err(err) => {
-                                                        if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
-                                                        None
+                                            let imported =
+                                                cab_lib.lock().ok().and_then(|l| {
+                                                    match l.import_ir(&bytes, &fname) {
+                                                        Ok(meta) => Some(meta.content_hash),
+                                                        Err(err) => {
+                                                            if let Ok(mut e) = cab_err.lock() {
+                                                                *e = Some(err.to_string());
+                                                            }
+                                                            None
+                                                        }
                                                     }
-                                                }
-                                            });
+                                                });
                                             if let Some(hash) = imported {
                                                 if build_and_publish(&bytes) {
-                                                    if let Ok(l) = cab_lib.lock() { let _ = l.set_selected_hash(&hash); }
-                                                    if let Ok(mut g) = state.params.cab_active_hash.write() { *g = hash.clone(); }
+                                                    if let Ok(l) = cab_lib.lock() {
+                                                        let _ = l.set_selected_hash(&hash);
+                                                    }
+                                                    if let Ok(mut g) =
+                                                        state.params.cab_active_hash.write()
+                                                    {
+                                                        *g = hash.clone();
+                                                    }
                                                 }
                                             }
                                         }
                                         Err(err) => {
-                                            if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                            if let Ok(mut e) = cab_err.lock() {
+                                                *e = Some(err.to_string());
+                                            }
                                         }
                                     }
                                 }
@@ -435,7 +584,9 @@ use egui_knob::{Knob, KnobStyle};
                                     .map(|g| *g == hash)
                                     .unwrap_or(false)
                                 {
-                                    if let Ok(mut g) = state.params.cab_active_hash.write() { g.clear(); }
+                                    if let Ok(mut g) = state.params.cab_active_hash.write() {
+                                        g.clear();
+                                    }
                                     cab_mailbox.clear();
                                 }
                             },
@@ -458,7 +609,9 @@ use egui_knob::{Knob, KnobStyle};
                                         .and_then(|l| l.get_ir_by_hash(&hash).ok().map(|(_, b)| b));
                                     if let Some(b) = bytes {
                                         if let Err(err) = std::fs::write(&path, &b) {
-                                            if let Ok(mut e) = cab_err.lock() { *e = Some(err.to_string()); }
+                                            if let Ok(mut e) = cab_err.lock() {
+                                                *e = Some(err.to_string());
+                                            }
                                         }
                                     }
                                 }
@@ -466,7 +619,7 @@ use egui_knob::{Knob, KnobStyle};
                         );
                     },
                 );
-            }
+            },
         )
     }
 
@@ -478,18 +631,33 @@ use egui_knob::{Knob, KnobStyle};
     ) -> bool {
         let sample_rate = buffer_config.sample_rate;
         for f in &mut self.faust {
-            if let Some(faust) = f { faust.init(sample_rate); }
+            if let Some(faust) = f {
+                faust.init(sample_rate);
+            }
         }
         for m in &mut self.mojo {
-            if let Some(mojo) = m { mojo.init(sample_rate); }
+            if let Some(mojo) = m {
+                mojo.init(sample_rate);
+            }
+        }
+        for m in &mut self.mlc_zero_v {
+            if let Some(mlc) = m {
+                mlc.init(sample_rate);
+            }
         }
 
         // 1. Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
         if let Some(ir_samples) = decode_wav_flat(DEFAULT_PRE_EQ_IR) {
             let mut conv_l = FFTConvolver::default();
             let mut conv_r = FFTConvolver::default();
-            if !ir_samples.is_empty() && conv_l.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() &&
-               conv_r.init(buffer_config.max_buffer_size as usize, &ir_samples).is_ok() {
+            if !ir_samples.is_empty()
+                && conv_l
+                    .init(buffer_config.max_buffer_size as usize, &ir_samples)
+                    .is_ok()
+                && conv_r
+                    .init(buffer_config.max_buffer_size as usize, &ir_samples)
+                    .is_ok()
+            {
                 self.pre_eq_convolver = [Some(conv_l), Some(conv_r)];
             }
         }
@@ -547,27 +715,53 @@ use egui_knob::{Knob, KnobStyle};
         _aux: &mut AuxiliaryBuffers,
         _context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
-        let input_mode   = self.params.input_select.value();
-        let bypass       = self.params.bypass.value();
-        
-        let gain                = self.params.gain.smoothed.next();
-        let neural_vol          = self.params.neural_amp_volume.smoothed.next();
-        let neural_drive        = self.params.neural_drive.smoothed.next();
-        let neural_output_gain  = self.params.neural_output_gain.smoothed.next();
-        let neural_active       = self.params.neural_amp_active.value();
-        let eq_active           = self.params.eq_active.value();
-        let eq_low_freq         = self.params.eq_low_freq.smoothed.next();
-        let eq_low_gain         = self.params.eq_low_gain.smoothed.next();
-        let eq_low_q            = self.params.eq_low_q.smoothed.next();
-        let eq_mid_freq         = self.params.eq_mid_freq.smoothed.next();
-        let eq_mid_gain         = self.params.eq_mid_gain.smoothed.next();
-        let eq_mid_q            = self.params.eq_mid_q.smoothed.next();
-        let eq_high_freq        = self.params.eq_high_freq.smoothed.next();
-        let eq_high_gain        = self.params.eq_high_gain.smoothed.next();
-        let eq_high_q           = self.params.eq_high_q.smoothed.next();
-        let cab_bypass          = self.params.cabinet_bypass.value();
-        let cab_level           = self.params.cabinet_level.smoothed.next();
-        let cab_mix             = self.params.cabinet_mix.smoothed.next();
+        let input_mode = self.params.input_select.value();
+        let amp_model = self.params.amp_model.value();
+        let bypass = self.params.bypass.value();
+
+        let gain = self.params.gain.smoothed.next();
+        let neural_vol = self.params.neural_amp_volume.smoothed.next();
+        let neural_drive = self.params.neural_drive.smoothed.next();
+        let neural_output_gain = self.params.neural_output_gain.smoothed.next();
+        let neural_active = self.params.neural_amp_active.value();
+        let mlc_params = MlcBlockParams {
+            gain: self.params.mlc_gain.smoothed.next(),
+            master: self.params.mlc_master.smoothed.next(),
+            bass: self.params.mlc_bass.smoothed.next(),
+            middle: self.params.mlc_middle.smoothed.next(),
+            treble: self.params.mlc_treble.smoothed.next(),
+            presence: self.params.mlc_presence.smoothed.next(),
+            depth: self.params.mlc_depth.smoothed.next(),
+            gate: self.params.mlc_gate.smoothed.next(),
+            bright: match self.params.mlc_bright.value() {
+                MlcBright::I => 0.0,
+                MlcBright::Ii => 1.0,
+            },
+            m45: self.params.mlc_m45.value(),
+            warclaw: self.params.mlc_warclaw.value(),
+            feedback: match self.params.mlc_feedback.value() {
+                MlcFeedback::Lo => 0.0,
+                MlcFeedback::Hi => 1.0,
+            },
+            gate_pos: match self.params.mlc_gate_pos.value() {
+                MlcGatePos::Pre => 0.0,
+                MlcGatePos::Post => 1.0,
+            },
+        };
+        let eq_active = self.params.eq_active.value();
+        let eq_tanh_bypass = self.params.eq_tanh_bypass.value();
+        let eq_low_freq = self.params.eq_low_freq.smoothed.next();
+        let eq_low_gain = self.params.eq_low_gain.smoothed.next();
+        let eq_low_q = self.params.eq_low_q.smoothed.next();
+        let eq_mid_freq = self.params.eq_mid_freq.smoothed.next();
+        let eq_mid_gain = self.params.eq_mid_gain.smoothed.next();
+        let eq_mid_q = self.params.eq_mid_q.smoothed.next();
+        let eq_high_freq = self.params.eq_high_freq.smoothed.next();
+        let eq_high_gain = self.params.eq_high_gain.smoothed.next();
+        let eq_high_q = self.params.eq_high_q.smoothed.next();
+        let cab_bypass = self.params.cabinet_bypass.value();
+        let cab_level = self.params.cabinet_level.smoothed.next();
+        let cab_mix = self.params.cabinet_mix.smoothed.next();
 
         // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
         _context.set_latency_samples(0);
@@ -576,7 +770,9 @@ use egui_knob::{Knob, KnobStyle};
         for mut channel_samples in buffer.iter_samples() {
             let mut l_in = 0.0;
 
-            if let Some(l) = channel_samples.get_mut(0) { l_in = *l; }
+            if let Some(l) = channel_samples.get_mut(0) {
+                l_in = *l;
+            }
             // If there's a second channel, use it for Input2, otherwise default to l_in
             let r_source = channel_samples.get_mut(1).map_or(l_in, |r| *r);
 
@@ -587,14 +783,28 @@ use egui_knob::{Knob, KnobStyle};
             };
 
             // Aplica a seleção de input na própria buffer
-            if let Some(l) = channel_samples.get_mut(0) { *l = l_selected; }
-            if let Some(r) = channel_samples.get_mut(1) { *r = r_selected; }
+            if let Some(l) = channel_samples.get_mut(0) {
+                *l = l_selected;
+            }
+            if let Some(r) = channel_samples.get_mut(1) {
+                *r = r_selected;
+            }
         }
 
         // Recuperar referências slice-based do buffer do nih-plug para FFI zero-copy!
         let buffer_slices = buffer.as_slice();
 
         if !bypass {
+            if amp_model == self.previous_amp_model && self.crossfade_sample < CROSSFADE_LEN {
+                self.crossfade_sample = CROSSFADE_LEN;
+            } else if amp_model != self.previous_amp_model && self.crossfade_sample >= CROSSFADE_LEN
+            {
+                self.crossfade_sample = 0;
+            }
+            let crossfade_start = self.crossfade_sample;
+            let crossfading =
+                amp_model != self.previous_amp_model && crossfade_start < CROSSFADE_LEN;
+
             // ESTÁGIOS 1-3 (per-channel): Faust EQ → Pré-EQ → Neural drive
             for (channel_idx, channel_samples) in buffer_slices.iter_mut().enumerate() {
                 let len = channel_samples.len();
@@ -614,6 +824,7 @@ use egui_knob::{Knob, KnobStyle};
                             eq_high_gain,
                             eq_high_q,
                         );
+                        faust.set_eq_tanh_bypass(eq_tanh_bypass);
                         faust.process_block(channel_samples.as_mut_ptr(), len);
                     }
                 }
@@ -621,18 +832,90 @@ use egui_knob::{Knob, KnobStyle};
                 // ESTÁGIO 2: PRÉ-EQUALIZAÇÃO LTI (Pre-EQ Convolver)
                 if let Some(pre_eq) = &mut self.pre_eq_convolver[safe_idx] {
                     self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
-                    if pre_eq.process(&self.temp_buffer[..len], &mut channel_samples[..len]).is_err() {
+                    if pre_eq
+                        .process(&self.temp_buffer[..len], &mut channel_samples[..len])
+                        .is_err()
+                    {
                         channel_samples[..len].copy_from_slice(&self.temp_buffer[..len]);
                     }
                 }
 
-                // ESTÁGIO 3: INFERÊNCIA NEURAL (Drive Zero-Copy via MojoProcessor)
-                if neural_active {
-                    if let Some(mojo) = &mut self.mojo[safe_idx] {
-                        mojo.set_drive(neural_drive);
-                        mojo.set_output_gain(neural_output_gain);
-                        mojo.process_block(channel_samples.as_mut_ptr(), len);
+                if crossfading {
+                    let fade_len = len.min(MAX_BLOCK);
+                    self.temp_buffer[..len].copy_from_slice(&channel_samples[..len]);
+
+                    match self.previous_amp_model {
+                        AmpModel::Neural => {
+                            if neural_active {
+                                if let Some(mojo) = &mut self.mojo[safe_idx] {
+                                    mojo.set_drive(neural_drive);
+                                    mojo.set_output_gain(neural_output_gain);
+                                    mojo.process_block(channel_samples.as_mut_ptr(), len);
+                                }
+                            }
+                        }
+                        AmpModel::MlcZeroV => {
+                            if let Some(mlc) = &mut self.mlc_zero_v[safe_idx] {
+                                configure_mlc(mlc, mlc_params);
+                                mlc.process_block(channel_samples.as_mut_ptr(), len);
+                            }
+                        }
                     }
+
+                    self.crossfade_buf[safe_idx][..fade_len]
+                        .copy_from_slice(&channel_samples[..fade_len]);
+                    channel_samples[..len].copy_from_slice(&self.temp_buffer[..len]);
+
+                    match amp_model {
+                        AmpModel::Neural => {
+                            if neural_active {
+                                if let Some(mojo) = &mut self.mojo[safe_idx] {
+                                    mojo.set_drive(neural_drive);
+                                    mojo.set_output_gain(neural_output_gain);
+                                    mojo.process_block(channel_samples.as_mut_ptr(), len);
+                                }
+                            }
+                        }
+                        AmpModel::MlcZeroV => {
+                            if let Some(mlc) = &mut self.mlc_zero_v[safe_idx] {
+                                configure_mlc(mlc, mlc_params);
+                                mlc.process_block(channel_samples.as_mut_ptr(), len);
+                            }
+                        }
+                    }
+
+                    for (i, sample) in channel_samples[..fade_len].iter_mut().enumerate() {
+                        let fade_pos = (crossfade_start + i).min(CROSSFADE_LEN);
+                        let t = fade_pos as f32 / CROSSFADE_LEN as f32;
+                        let old = self.crossfade_buf[safe_idx][i];
+                        *sample = old + (*sample - old) * t;
+                    }
+                } else {
+                    match amp_model {
+                        AmpModel::Neural => {
+                            if neural_active {
+                                if let Some(mojo) = &mut self.mojo[safe_idx] {
+                                    mojo.set_drive(neural_drive);
+                                    mojo.set_output_gain(neural_output_gain);
+                                    mojo.process_block(channel_samples.as_mut_ptr(), len);
+                                }
+                            }
+                        }
+                        AmpModel::MlcZeroV => {
+                            if let Some(mlc) = &mut self.mlc_zero_v[safe_idx] {
+                                configure_mlc(mlc, mlc_params);
+                                mlc.process_block(channel_samples.as_mut_ptr(), len);
+                            }
+                        }
+                    }
+                }
+            }
+
+            if crossfading {
+                let len = buffer_slices.first().map_or(0, |c| c.len());
+                self.crossfade_sample = (crossfade_start + len).min(CROSSFADE_LEN);
+                if self.crossfade_sample >= CROSSFADE_LEN {
+                    self.previous_amp_model = amp_model;
                 }
             }
 
@@ -672,7 +955,7 @@ use egui_knob::{Knob, KnobStyle};
                 for sample in channel_samples.iter_mut() {
                     *sample *= gain;
                 }
-                if neural_active {
+                if amp_model == AmpModel::Neural && neural_active {
                     for sample in channel_samples.iter_mut() {
                         *sample *= neural_vol;
                     }
@@ -689,13 +972,19 @@ use egui_knob::{Knob, KnobStyle};
             }
         }
 
-        // Analyzer: amostra para visualização pós-processamento 
+        // Analyzer: amostra para visualização pós-processamento
         // e garante loop safe lendo as amostras resultantes
         for mut channel_samples in buffer.iter_samples() {
             let mut l_final = 0.0;
-            if let Some(l) = channel_samples.get_mut(0) { l_final = *l; }
+            if let Some(l) = channel_samples.get_mut(0) {
+                l_final = *l;
+            }
             // If there's a second channel, use it for Input2, otherwise default to l_in
-            let visual_sample = if let Some(r) = channel_samples.get_mut(1) { (l_final + *r) * 0.5 } else { l_final };
+            let visual_sample = if let Some(r) = channel_samples.get_mut(1) {
+                (l_final + *r) * 0.5
+            } else {
+                l_final
+            };
             let _ = self.analyzer_producer.push(visual_sample);
         }
 

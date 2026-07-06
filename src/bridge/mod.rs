@@ -1,4 +1,5 @@
 pub mod faust;
+pub mod mlc_zero_v;
 pub mod mojo;
 
 /// Trait comum para Processadores de Áudio Externos (Zero-Copy)

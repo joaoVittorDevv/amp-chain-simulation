@@ -37,7 +37,7 @@ fn pre_build_check() {
 
     // Validação Mojo (Busca Inteligente)
     let mojo_bin = find_mojo_path().expect("\n\n❌ ERRO: Compilador Mojo não encontrado.\nCertifique-se de que o Mojo está instalado e acessível (https://www.modular.com/mojo).\n\n");
-    
+
     // Configura o link path do Mojo dinamicamente
     if let Some(mojo_dir) = mojo_bin.parent() {
         if let Some(lib_dir) = mojo_dir.parent().map(|p| p.join("lib")) {
@@ -54,28 +54,76 @@ fn main() {
     println!("cargo:rerun-if-changed=dsp/wrapper.cpp");
     println!("cargo:rerun-if-changed=dsp/wrapper.h");
     println!("cargo:rerun-if-changed=dsp/main.dsp");
+    println!("cargo:rerun-if-changed=dsp/mlc_zero_v.dsp");
+    println!("cargo:rerun-if-changed=dsp/mlc_zero_v_wrapper.cpp");
+    println!("cargo:rerun-if-changed=dsp/mlc_zero_v_wrapper.h");
     println!("cargo:rerun-if-changed=neural/main.mojo");
 
     let dsp_dir = PathBuf::from("dsp");
     let main_dsp = dsp_dir.join("main.dsp");
+    let mlc_dsp = dsp_dir.join("mlc_zero_v.dsp");
     let wrapper_h = dsp_dir.join("wrapper.h");
+    let mlc_wrapper_h = dsp_dir.join("mlc_zero_v_wrapper.h");
 
     // Rebuild automático do Faust se .dsp existir e for alterado
     if main_dsp.exists() {
         let hpp_file = dsp_dir.join("FaustModule.hpp");
-        let should_rebuild = !hpp_file.exists() || 
-            std::fs::metadata(&main_dsp).unwrap().modified().unwrap() > 
-            std::fs::metadata(&hpp_file).unwrap().modified().unwrap();
+        let should_rebuild = !hpp_file.exists()
+            || std::fs::metadata(&main_dsp).unwrap().modified().unwrap()
+                > std::fs::metadata(&hpp_file).unwrap().modified().unwrap();
 
         if should_rebuild {
             println!("cargo:warning=Recompilando Faust (.dsp -> .hpp)...");
             let status = Command::new("faust")
-                .args(&["-lang", "cpp", "-cn", "mydsp", "-vec", "-I", "faust-ddsp", "-i", "dsp/main.dsp", "-o", "dsp/FaustModule.hpp"])
+                .args(&[
+                    "-lang",
+                    "cpp",
+                    "-cn",
+                    "mydsp",
+                    "-vec",
+                    "-I",
+                    "faust-ddsp",
+                    "-i",
+                    "dsp/main.dsp",
+                    "-o",
+                    "dsp/FaustModule.hpp",
+                ])
                 .status()
                 .expect("Falha ao executar o compilador Faust.");
-            
+
             if !status.success() {
                 panic!("Erro na transpilação do arquivo Faust (main.dsp).");
+            }
+        }
+    }
+
+    if mlc_dsp.exists() {
+        let hpp_file = dsp_dir.join("MlcZeroVModule.hpp");
+        let should_rebuild = !hpp_file.exists()
+            || std::fs::metadata(&mlc_dsp).unwrap().modified().unwrap()
+                > std::fs::metadata(&hpp_file).unwrap().modified().unwrap();
+
+        if should_rebuild {
+            println!("cargo:warning=Recompilando Faust MLC ZERO V (.dsp -> .hpp)...");
+            let status = Command::new("faust")
+                .args(&[
+                    "-lang",
+                    "cpp",
+                    "-cn",
+                    "mlczerov",
+                    "-vec",
+                    "-I",
+                    "faust-ddsp",
+                    "-i",
+                    "dsp/mlc_zero_v.dsp",
+                    "-o",
+                    "dsp/MlcZeroVModule.hpp",
+                ])
+                .status()
+                .expect("Falha ao executar o compilador Faust.");
+
+            if !status.success() {
+                panic!("Erro na transpilação do arquivo Faust (mlc_zero_v.dsp).");
             }
         }
     }
@@ -84,18 +132,25 @@ fn main() {
     let main_mojo = PathBuf::from("neural/main.mojo");
     let lib_so = PathBuf::from("neural/libneural.so");
     if main_mojo.exists() {
-        let should_rebuild = !lib_so.exists() || 
-            std::fs::metadata(&main_mojo).unwrap().modified().unwrap() > 
-            std::fs::metadata(&lib_so).unwrap().modified().unwrap();
+        let should_rebuild = !lib_so.exists()
+            || std::fs::metadata(&main_mojo).unwrap().modified().unwrap()
+                > std::fs::metadata(&lib_so).unwrap().modified().unwrap();
 
         if should_rebuild {
             println!("cargo:warning=Recompilando Mojo (.mojo -> .so)...");
             let mojo_bin = find_mojo_path().unwrap();
             let status = Command::new(mojo_bin)
-                .args(&["build", "--emit", "shared-lib", "neural/main.mojo", "-o", "neural/libneural.so"])
+                .args(&[
+                    "build",
+                    "--emit",
+                    "shared-lib",
+                    "neural/main.mojo",
+                    "-o",
+                    "neural/libneural.so",
+                ])
                 .status()
                 .expect("Falha ao executar o compilador Mojo.");
-            
+
             if !status.success() {
                 panic!("Erro na compilação do arquivo Mojo (main.mojo).");
             }
@@ -107,7 +162,15 @@ fn main() {
         .cpp(true)
         .file(dsp_dir.join("wrapper.cpp"))
         .opt_level(3)
+        .warnings(false)
         .compile("faust_dsp");
+
+    cc::Build::new()
+        .cpp(true)
+        .file(dsp_dir.join("mlc_zero_v_wrapper.cpp"))
+        .opt_level(3)
+        .warnings(false)
+        .compile("mlc_zero_v_dsp");
 
     // 2. Roda o Bindgen
     let bindings = bindgen::Builder::default()
@@ -122,8 +185,22 @@ fn main() {
         .write_to_file(out_path.join("bindings_faust.rs"))
         .expect("Não foi possível escrever os bindings.");
 
+    let mlc_bindings = bindgen::Builder::default()
+        .header(mlc_wrapper_h.to_str().unwrap())
+        .allowlist_function("mlc_zero_v_.*")
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        .generate()
+        .expect("Não foi possível gerar os bindings do MLC ZERO V.");
+
+    mlc_bindings
+        .write_to_file(out_path.join("bindings_mlc_zero_v.rs"))
+        .expect("Não foi possível escrever os bindings do MLC ZERO V.");
+
     // 3. Linking do Mojo
-    println!("cargo:rustc-link-search=native={}/neural", env::var("CARGO_MANIFEST_DIR").unwrap());
+    let neural_dir = format!("{}/neural", env::var("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rustc-link-search=native={}", neural_dir);
+    if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("linux") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", neural_dir);
+    }
     println!("cargo:rustc-link-lib=dylib=neural");
 }
-

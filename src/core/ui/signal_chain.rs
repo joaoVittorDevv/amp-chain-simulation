@@ -1,3 +1,4 @@
+use crate::core::state::plugin_params::AmpModel;
 use nih_plug_egui::egui;
 
 /// Which panel is currently open in the bottom panel area.
@@ -6,6 +7,7 @@ pub enum ActivePanel {
     None,
     EQ,
     NeuralAmp,
+    MlcZeroV,
     Cabinet,
 }
 
@@ -16,14 +18,15 @@ pub fn draw_signal_chain(
     neural_active: bool,
     cabinet_active: bool,
     global_bypass: bool,
+    amp_model: AmpModel,
     mut on_eq_toggle: impl FnMut(),
     mut on_neural_toggle: impl FnMut(),
     mut on_cabinet_toggle: impl FnMut(),
+    mut on_neural_select: impl FnMut(),
+    mut on_mlc_select: impl FnMut(),
 ) {
-    let (rect, _response) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), 60.0),
-        egui::Sense::hover(),
-    );
+    let (rect, _response) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 60.0), egui::Sense::hover());
 
     let painter = ui.painter_at(rect);
 
@@ -45,12 +48,13 @@ pub fn draw_signal_chain(
 
     // --- Helper closure: draw a single node ---
     let draw_node = |painter: &egui::Painter,
-                      ui_ref: &mut egui::Ui,
-                      x_center: f32,
-                      label: &str,
-                      id_str: &str,
-                      is_panel_active: bool,
-                      is_module_active: bool| -> (bool, bool) {
+                     ui_ref: &mut egui::Ui,
+                     x_center: f32,
+                     label: &str,
+                     id_str: &str,
+                     is_panel_active: bool,
+                     is_module_active: bool|
+     -> (bool, bool) {
         let node_width = label.len() as f32 * 8.5 + 40.0; // wider for power button
         let node_rect = egui::Rect::from_center_size(
             egui::pos2(x_center, line_y),
@@ -58,14 +62,18 @@ pub fn draw_signal_chain(
         );
 
         let response = ui_ref.interact(node_rect, egui::Id::new(id_str), egui::Sense::click());
-        
+
         // Power button rect (top right corner)
         let power_size = 14.0;
         let power_rect = egui::Rect::from_center_size(
             node_rect.right_top() + egui::vec2(-power_size * 0.6, power_size * 0.6),
-            egui::vec2(power_size, power_size)
+            egui::vec2(power_size, power_size),
         );
-        let power_resp = ui_ref.interact(power_rect, egui::Id::new(format!("{}_power", id_str)), egui::Sense::click());
+        let power_resp = ui_ref.interact(
+            power_rect,
+            egui::Id::new(format!("{}_power", id_str)),
+            egui::Sense::click(),
+        );
 
         let visually_active = is_module_active && !global_bypass;
 
@@ -99,15 +107,22 @@ pub fn draw_signal_chain(
         } else if is_module_active && global_bypass {
             egui::Color32::from_rgb(0, 100, 50) // Dimmed green when global bypass is ON
         } else {
-            egui::Color32::from_rgb(255, 50, 50)  // Red "OFF"
+            egui::Color32::from_rgb(255, 50, 50) // Red "OFF"
         };
-        
+
         let icon_center = power_rect.center();
         let icon_radius = power_size * 0.35;
-        
-        painter.circle_stroke(icon_center, icon_radius, egui::Stroke::new(1.5, power_icon_color));
+
+        painter.circle_stroke(
+            icon_center,
+            icon_radius,
+            egui::Stroke::new(1.5, power_icon_color),
+        );
         painter.line_segment(
-            [icon_center - egui::vec2(0.0, icon_radius * 0.4), icon_center - egui::vec2(0.0, icon_radius * 1.3)],
+            [
+                icon_center - egui::vec2(0.0, icon_radius * 0.4),
+                icon_center - egui::vec2(0.0, icon_radius * 1.3),
+            ],
             egui::Stroke::new(1.5, power_icon_color),
         );
 
@@ -116,18 +131,21 @@ pub fn draw_signal_chain(
             egui::Align2::CENTER_CENTER,
             label,
             egui::FontId::proportional(11.0),
-            if visually_active { egui::Color32::from_rgb(210, 210, 210) } else { egui::Color32::from_rgb(100, 100, 110) },
+            if visually_active {
+                egui::Color32::from_rgb(210, 210, 210)
+            } else {
+                egui::Color32::from_rgb(100, 100, 110)
+            },
         );
 
         (response.clicked(), power_resp.clicked())
     };
 
-    // Three processing nodes placed at n/4 of the span (n = 1,2,3); the final
-    // quarter (the line's right end) is the OUTPUT terminus and isn't a node.
     let total_span = end_x - start_x;
-    let eq_x = start_x + total_span * 0.25;
-    let neural_x = start_x + total_span * 0.50;
-    let cabinet_x = start_x + total_span * 0.75;
+    let eq_x = start_x + total_span * 0.20;
+    let neural_x = start_x + total_span * 0.40;
+    let mlc_x = start_x + total_span * 0.60;
+    let cabinet_x = start_x + total_span * 0.80;
 
     // Draw nodes
     let (eq_clicked, eq_power_clicked) = draw_node(
@@ -147,7 +165,17 @@ pub fn draw_signal_chain(
         "NEURAL AMP",
         "neural_node",
         *active_panel == ActivePanel::NeuralAmp,
-        neural_active,
+        amp_model == AmpModel::Neural && neural_active,
+    );
+
+    let (mlc_clicked, mlc_power_clicked) = draw_node(
+        &painter,
+        ui,
+        mlc_x,
+        "MLC ZERO V",
+        "mlc_zero_v_node",
+        *active_panel == ActivePanel::MlcZeroV,
+        amp_model == AmpModel::MlcZeroV,
     );
 
     let (cabinet_clicked, cabinet_power_clicked) = draw_node(
@@ -173,10 +201,20 @@ pub fn draw_signal_chain(
     if neural_power_clicked {
         on_neural_toggle();
     } else if neural_clicked {
+        on_neural_select();
         *active_panel = if *active_panel == ActivePanel::NeuralAmp {
             ActivePanel::None
         } else {
             ActivePanel::NeuralAmp
+        };
+    }
+
+    if mlc_power_clicked || mlc_clicked {
+        on_mlc_select();
+        *active_panel = if *active_panel == ActivePanel::MlcZeroV {
+            ActivePanel::None
+        } else {
+            ActivePanel::MlcZeroV
         };
     }
 

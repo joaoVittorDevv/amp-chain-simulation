@@ -1,8 +1,8 @@
+use crate::core::dsp;
 use nih_plug::prelude::*;
 use nih_plug_egui::EguiState;
-use std::sync::{Arc, Mutex};
 use rtrb::Consumer;
-use crate::core::dsp;
+use std::sync::{Arc, Mutex};
 
 #[derive(Enum, PartialEq, Clone, Copy, Debug)]
 pub enum InputSelect {
@@ -12,6 +12,38 @@ pub enum InputSelect {
     Input1,
     #[name = "Input 2 (Guitar)"]
     Input2,
+}
+
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum AmpModel {
+    #[name = "Neural"]
+    Neural,
+    #[name = "MLC ZERO V"]
+    MlcZeroV,
+}
+
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum MlcBright {
+    #[name = "I"]
+    I,
+    #[name = "II"]
+    Ii,
+}
+
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum MlcFeedback {
+    #[name = "Lo"]
+    Lo,
+    #[name = "Hi"]
+    Hi,
+}
+
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum MlcGatePos {
+    #[name = "Pre"]
+    Pre,
+    #[name = "Post"]
+    Post,
 }
 
 #[derive(Params)]
@@ -28,6 +60,9 @@ pub struct BaseIOParams {
     #[id = "bypass"]
     pub bypass: BoolParam,
 
+    #[id = "amp_model"]
+    pub amp_model: EnumParam<AmpModel>,
+
     // --- Neural Amp ---
     #[id = "neural_amp_volume"]
     pub neural_amp_volume: FloatParam,
@@ -40,6 +75,46 @@ pub struct BaseIOParams {
 
     #[id = "neural_amp_active"]
     pub neural_amp_active: BoolParam,
+
+    // --- MLC ZERO V ---
+    #[id = "mlc_gain"]
+    pub mlc_gain: FloatParam,
+
+    #[id = "mlc_master"]
+    pub mlc_master: FloatParam,
+
+    #[id = "mlc_bass"]
+    pub mlc_bass: FloatParam,
+
+    #[id = "mlc_middle"]
+    pub mlc_middle: FloatParam,
+
+    #[id = "mlc_treble"]
+    pub mlc_treble: FloatParam,
+
+    #[id = "mlc_presence"]
+    pub mlc_presence: FloatParam,
+
+    #[id = "mlc_depth"]
+    pub mlc_depth: FloatParam,
+
+    #[id = "mlc_gate"]
+    pub mlc_gate: FloatParam,
+
+    #[id = "mlc_bright"]
+    pub mlc_bright: EnumParam<MlcBright>,
+
+    #[id = "mlc_m45"]
+    pub mlc_m45: BoolParam,
+
+    #[id = "mlc_warclaw"]
+    pub mlc_warclaw: BoolParam,
+
+    #[id = "mlc_feedback"]
+    pub mlc_feedback: EnumParam<MlcFeedback>,
+
+    #[id = "mlc_gate_pos"]
+    pub mlc_gate_pos: EnumParam<MlcGatePos>,
 
     // --- Cabinet IR ---
     #[id = "cab_bypass"]
@@ -59,6 +134,9 @@ pub struct BaseIOParams {
     // --- Parametric EQ ---
     #[id = "eq_active"]
     pub eq_active: BoolParam,
+
+    #[id = "eq_tanh_bypass"]
+    pub eq_tanh_bypass: BoolParam,
 
     #[id = "eq_low_freq"]
     pub eq_low_freq: FloatParam,
@@ -112,113 +190,314 @@ impl Default for BaseIOParams {
                 FloatRange::Skewed {
                     min: util::db_to_gain(-30.0),
                     max: util::db_to_gain(30.0),
-                factor: FloatRange::gain_skew_factor(-30.0, 30.0),
-            },
-        )
-        .with_smoother(SmoothingStyle::Logarithmic(50.0))
-        .with_unit(" dB")
-        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+                    factor: FloatRange::gain_skew_factor(-30.0, 30.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        bypass: BoolParam::new("Bypass", false),
+            bypass: BoolParam::new("Bypass", false),
 
-        // --- Neural Amp defaults ---
-        neural_amp_volume: FloatParam::new(
-            "Neural Volume",
-            util::db_to_gain(0.0),
-            FloatRange::Skewed {
-                min: util::db_to_gain(-24.0),
-                max: util::db_to_gain(12.0),
-                factor: FloatRange::gain_skew_factor(-24.0, 12.0),
-            },
-        )
-        .with_smoother(SmoothingStyle::Logarithmic(50.0))
-        .with_unit(" dB")
-        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            amp_model: EnumParam::new("Amp Model", AmpModel::Neural),
 
-        neural_drive: FloatParam::new(
-            "Neural Drive",
-            util::db_to_gain(0.0),
-            FloatRange::Skewed {
-                min: util::db_to_gain(0.0),
-                max: util::db_to_gain(30.0),
-                factor: FloatRange::gain_skew_factor(0.0, 30.0),
-            },
-        )
-        .with_smoother(SmoothingStyle::Logarithmic(50.0))
-        .with_unit(" dB")
-        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            // --- Neural Amp defaults ---
+            neural_amp_volume: FloatParam::new(
+                "Neural Volume",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-24.0),
+                    max: util::db_to_gain(12.0),
+                    factor: FloatRange::gain_skew_factor(-24.0, 12.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        neural_output_gain: FloatParam::new(
-            "Neural Makeup",
-            util::db_to_gain(0.0),
-            FloatRange::Skewed {
-                min: util::db_to_gain(-24.0),
-                max: util::db_to_gain(12.0),
-                factor: FloatRange::gain_skew_factor(-24.0, 12.0),
-            },
-        )
-        .with_smoother(SmoothingStyle::Logarithmic(50.0))
-        .with_unit(" dB")
-        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            neural_drive: FloatParam::new(
+                "Neural Drive",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(0.0),
+                    max: util::db_to_gain(30.0),
+                    factor: FloatRange::gain_skew_factor(0.0, 30.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        neural_amp_active: BoolParam::new("Neural Amp Active", true),
+            neural_output_gain: FloatParam::new(
+                "Neural Makeup",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-24.0),
+                    max: util::db_to_gain(12.0),
+                    factor: FloatRange::gain_skew_factor(-24.0, 12.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        // --- Cabinet IR defaults ---
-        cabinet_bypass: BoolParam::new("Cabinet Bypass", false),
+            neural_amp_active: BoolParam::new("Neural Amp Active", true),
 
-        cabinet_level: FloatParam::new(
-            "Cabinet Level",
-            util::db_to_gain(0.0),
-            FloatRange::Skewed {
-                min: util::db_to_gain(-24.0),
-                max: util::db_to_gain(12.0),
-                factor: FloatRange::gain_skew_factor(-24.0, 12.0),
-            },
-        )
-        .with_smoother(SmoothingStyle::Logarithmic(50.0))
-        .with_unit(" dB")
-        .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
-        .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            // --- MLC ZERO V defaults ---
+            mlc_gain: FloatParam::new(
+                "MLC Gain",
+                util::db_to_gain(-12.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-60.0),
+                    max: util::db_to_gain(0.0),
+                    factor: FloatRange::gain_skew_factor(-60.0, 0.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        cabinet_mix: FloatParam::new(
-            "Cabinet Mix",
-            1.0,
-            FloatRange::Linear { min: 0.0, max: 1.0 },
-        )
-        .with_smoother(SmoothingStyle::Linear(50.0))
-        .with_unit(" %")
-        .with_value_to_string(formatters::v2s_f32_percentage(0))
-        .with_string_to_value(formatters::s2v_f32_percentage()),
+            mlc_master: FloatParam::new(
+                "MLC Master",
+                util::db_to_gain(-6.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-60.0),
+                    max: util::db_to_gain(0.0),
+                    factor: FloatRange::gain_skew_factor(-60.0, 0.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        cab_active_hash: std::sync::RwLock::new(String::new()),
+            mlc_bass: FloatParam::new(
+                "MLC Bass",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            mlc_middle: FloatParam::new(
+                "MLC Middle",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            mlc_treble: FloatParam::new(
+                "MLC Treble",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            mlc_presence: FloatParam::new(
+                "MLC Presence",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            mlc_depth: FloatParam::new(
+                "MLC Depth",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            mlc_gate: FloatParam::new(
+                "MLC Gate",
+                -80.0,
+                FloatRange::Linear {
+                    min: -80.0,
+                    max: 0.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        // --- EQ Defaults ---
-        eq_active: BoolParam::new("EQ Active", true),
+            mlc_bright: EnumParam::new("MLC Bright", MlcBright::Ii),
+            mlc_m45: BoolParam::new("MLC M45", false),
+            mlc_warclaw: BoolParam::new("MLC WARCLAW", false),
+            mlc_feedback: EnumParam::new("MLC Feedback", MlcFeedback::Hi),
+            mlc_gate_pos: EnumParam::new("MLC Gate Pos", MlcGatePos::Pre),
 
-        eq_low_freq: FloatParam::new("Low Freq", 100.0, FloatRange::Skewed { min: 20.0, max: 1000.0, factor: FloatRange::skew_factor(150.0) })
-            .with_smoother(SmoothingStyle::Logarithmic(50.0)).with_unit(" Hz").with_value_to_string(formatters::v2s_f32_hz_then_khz(2)).with_string_to_value(formatters::s2v_f32_hz_then_khz()),
-        eq_low_gain: FloatParam::new("Low Gain", 0.0, FloatRange::Linear { min: -12.0, max: 12.0 })
-            .with_smoother(SmoothingStyle::Linear(50.0)).with_unit(" dB").with_value_to_string(formatters::v2s_f32_gain_to_db(2)).with_string_to_value(formatters::s2v_f32_gain_to_db()),
-        eq_low_q: FloatParam::new("Low Q", 0.707, FloatRange::Skewed { min: 0.707, max: 10.0, factor: FloatRange::skew_factor(1.0) })
-            .with_smoother(SmoothingStyle::Linear(50.0)).with_value_to_string(formatters::v2s_f32_rounded(2)),
+            // --- Cabinet IR defaults ---
+            cabinet_bypass: BoolParam::new("Cabinet Bypass", false),
 
-        eq_mid_freq: FloatParam::new("Mid Freq", 1000.0, FloatRange::Skewed { min: 100.0, max: 10000.0, factor: FloatRange::skew_factor(1000.0) })
-            .with_smoother(SmoothingStyle::Logarithmic(50.0)).with_unit(" Hz").with_value_to_string(formatters::v2s_f32_hz_then_khz(2)).with_string_to_value(formatters::s2v_f32_hz_then_khz()),
-        eq_mid_gain: FloatParam::new("Mid Gain", 0.0, FloatRange::Linear { min: -12.0, max: 12.0 })
-            .with_smoother(SmoothingStyle::Linear(50.0)).with_unit(" dB").with_value_to_string(formatters::v2s_f32_gain_to_db(2)).with_string_to_value(formatters::s2v_f32_gain_to_db()),
-        eq_mid_q: FloatParam::new("Mid Q", 0.707, FloatRange::Skewed { min: 0.707, max: 10.0, factor: FloatRange::skew_factor(1.0) })
-            .with_smoother(SmoothingStyle::Linear(50.0)).with_value_to_string(formatters::v2s_f32_rounded(2)),
+            cabinet_level: FloatParam::new(
+                "Cabinet Level",
+                util::db_to_gain(0.0),
+                FloatRange::Skewed {
+                    min: util::db_to_gain(-24.0),
+                    max: util::db_to_gain(12.0),
+                    factor: FloatRange::gain_skew_factor(-24.0, 12.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
 
-        eq_high_freq: FloatParam::new("High Freq", 5000.0, FloatRange::Skewed { min: 1000.0, max: 20000.0, factor: FloatRange::skew_factor(5000.0) })
-            .with_smoother(SmoothingStyle::Logarithmic(50.0)).with_unit(" Hz").with_value_to_string(formatters::v2s_f32_hz_then_khz(2)).with_string_to_value(formatters::s2v_f32_hz_then_khz()),
-        eq_high_gain: FloatParam::new("High Gain", 0.0, FloatRange::Linear { min: -12.0, max: 12.0 })
-            .with_smoother(SmoothingStyle::Linear(50.0)).with_unit(" dB").with_value_to_string(formatters::v2s_f32_gain_to_db(2)).with_string_to_value(formatters::s2v_f32_gain_to_db()),
-        eq_high_q: FloatParam::new("High Q", 0.707, FloatRange::Skewed { min: 0.707, max: 10.0, factor: FloatRange::skew_factor(1.0) })
-            .with_smoother(SmoothingStyle::Linear(50.0)).with_value_to_string(formatters::v2s_f32_rounded(2)),
+            cabinet_mix: FloatParam::new(
+                "Cabinet Mix",
+                1.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" %")
+            .with_value_to_string(formatters::v2s_f32_percentage(0))
+            .with_string_to_value(formatters::s2v_f32_percentage()),
+
+            cab_active_hash: std::sync::RwLock::new(String::new()),
+
+            // --- EQ Defaults ---
+            eq_active: BoolParam::new("EQ Active", true),
+            eq_tanh_bypass: BoolParam::new("EQ Tanh Bypass", false),
+
+            eq_low_freq: FloatParam::new(
+                "Low Freq",
+                100.0,
+                FloatRange::Skewed {
+                    min: 20.0,
+                    max: 1000.0,
+                    factor: FloatRange::skew_factor(150.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" Hz")
+            .with_value_to_string(formatters::v2s_f32_hz_then_khz(2))
+            .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+            eq_low_gain: FloatParam::new(
+                "Low Gain",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            eq_low_q: FloatParam::new(
+                "Low Q",
+                0.707,
+                FloatRange::Skewed {
+                    min: 0.707,
+                    max: 10.0,
+                    factor: FloatRange::skew_factor(1.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            eq_mid_freq: FloatParam::new(
+                "Mid Freq",
+                1000.0,
+                FloatRange::Skewed {
+                    min: 100.0,
+                    max: 10000.0,
+                    factor: FloatRange::skew_factor(1000.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" Hz")
+            .with_value_to_string(formatters::v2s_f32_hz_then_khz(2))
+            .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+            eq_mid_gain: FloatParam::new(
+                "Mid Gain",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            eq_mid_q: FloatParam::new(
+                "Mid Q",
+                0.707,
+                FloatRange::Skewed {
+                    min: 0.707,
+                    max: 10.0,
+                    factor: FloatRange::skew_factor(1.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            eq_high_freq: FloatParam::new(
+                "High Freq",
+                5000.0,
+                FloatRange::Skewed {
+                    min: 1000.0,
+                    max: 20000.0,
+                    factor: FloatRange::skew_factor(5000.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" Hz")
+            .with_value_to_string(formatters::v2s_f32_hz_then_khz(2))
+            .with_string_to_value(formatters::s2v_f32_hz_then_khz()),
+            eq_high_gain: FloatParam::new(
+                "High Gain",
+                0.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 12.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_gain_to_db(2))
+            .with_string_to_value(formatters::s2v_f32_gain_to_db()),
+            eq_high_q: FloatParam::new(
+                "High Q",
+                0.707,
+                FloatRange::Skewed {
+                    min: 0.707,
+                    max: 10.0,
+                    factor: FloatRange::skew_factor(1.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
         }
     }
 }

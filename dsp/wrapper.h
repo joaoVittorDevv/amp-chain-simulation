@@ -35,6 +35,7 @@ void faust_set_eq_mid_q(FaustHandle handle, float q);
 void faust_set_eq_high_freq(FaustHandle handle, float freq);
 void faust_set_eq_high_gain(FaustHandle handle, float gain);
 void faust_set_eq_high_q(FaustHandle handle, float q);
+void faust_set_eq_tanh_bypass(FaustHandle handle, float value);
 
 #ifdef __cplusplus
 }

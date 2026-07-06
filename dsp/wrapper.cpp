@@ -53,6 +53,7 @@ public:
     void addHorizontalSlider(const char* label, float* zone, float /*init*/, float /*min*/, float /*max*/, float /*step*/) override { params[label] = zone; }
     void addVerticalSlider(const char* label, float* zone, float /*init*/, float /*min*/, float /*max*/, float /*step*/) override { params[label] = zone; }
     void addNumEntry(const char* label, float* zone, float /*init*/, float /*min*/, float /*max*/, float /*step*/) override { params[label] = zone; }
+    void addCheckButton(const char* label, float* zone) override { params[label] = zone; }
     
     // Virtual voids estruturais sendo ignorados (não nos interessa desenhar UI via Faust)
     void openTabBox(const char* /*label*/) override {}
@@ -60,7 +61,6 @@ public:
     void openVerticalBox(const char* /*label*/) override {}
     void closeBox() override {}
     void addButton(const char* /*label*/, float* /*zone*/) override {}
-    void addCheckButton(const char* /*label*/, float* /*zone*/) override {}
     void addVerticalBargraph(const char* /*label*/, float* /*zone*/, float /*min*/, float /*max*/) override {}
     void addHorizontalBargraph(const char* /*label*/, float* /*zone*/, float /*min*/, float /*max*/) override {}
     void declare(float* /*zone*/, const char* /*key*/, const char* /*val*/) override {}
@@ -125,5 +125,6 @@ void faust_set_eq_mid_q(FaustHandle handle, float q)       { SET_PARAM("EQ Mid Q
 void faust_set_eq_high_freq(FaustHandle handle, float freq){ SET_PARAM("EQ High Freq", freq); }
 void faust_set_eq_high_gain(FaustHandle handle, float gain){ SET_PARAM("EQ High Gain", gain); }
 void faust_set_eq_high_q(FaustHandle handle, float q)      { SET_PARAM("EQ High Q", q); }
+void faust_set_eq_tanh_bypass(FaustHandle handle, float value) { SET_PARAM("EQ Tanh Bypass", value); }
 
 }

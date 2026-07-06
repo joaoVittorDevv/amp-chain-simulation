@@ -66,6 +66,7 @@ class mydsp : public dsp {
 	float fRec10[2];
 	float fRec2[2];
 	float fRec3[2];
+	FAUSTFLOAT fCheckbox0;
 	float fRec32[2];
 	float fRec33[2];
 	float fRec28[2];
@@ -128,6 +129,7 @@ class mydsp : public dsp {
 		fHslider6 = static_cast<FAUSTFLOAT>(0.707f);
 		fHslider7 = static_cast<FAUSTFLOAT>(0.0f);
 		fHslider8 = static_cast<FAUSTFLOAT>(1e+02f);
+		fCheckbox0 = static_cast<FAUSTFLOAT>(0.0f);
 	}
 	
 	virtual void instanceClear() {
@@ -232,6 +234,7 @@ class mydsp : public dsp {
 		ui_interface->declare(&fHslider3, "unit", "dB");
 		ui_interface->addHorizontalSlider("EQ Mid Gain", &fHslider3, FAUSTFLOAT(0.0f), FAUSTFLOAT(-12.0f), FAUSTFLOAT(12.0f), FAUSTFLOAT(0.1f));
 		ui_interface->addHorizontalSlider("EQ Mid Q", &fHslider5, FAUSTFLOAT(0.707f), FAUSTFLOAT(0.707f), FAUSTFLOAT(1e+01f), FAUSTFLOAT(0.01f));
+		ui_interface->addCheckButton("EQ Tanh Bypass", &fCheckbox0);
 		ui_interface->closeBox();
 	}
 	
@@ -249,6 +252,8 @@ class mydsp : public dsp {
 		float fSlow6 = fConst1 * static_cast<float>(fHslider6);
 		float fSlow7 = fConst1 * static_cast<float>(fHslider7);
 		float fSlow8 = fConst1 * static_cast<float>(fHslider8);
+		float fSlow9 = static_cast<float>(fCheckbox0);
+		float fSlow10 = 1.0f - fSlow9;
 		for (int i0 = 0; i0 < count; i0 = i0 + 1) {
 			fRec0[0] = fSlow0 + fConst2 * fRec0[1];
 			fRec1[0] = fSlow1 + fConst2 * fRec1[1];
@@ -302,37 +307,39 @@ class mydsp : public dsp {
 			float fTemp28 = fTemp24 / fTemp4;
 			float fRec5 = fTemp28;
 			float fRec6 = fTemp26;
-			output0[i0] = static_cast<FAUSTFLOAT>(tanhf(fRec4 + fRec5 * fTemp0 + fRec6 * fTemp1 / fRec0[0]));
-			float fTemp29 = static_cast<float>(input1[i0]) - (fTemp12 * fRec32[1] + fRec33[1]);
-			float fTemp30 = fTemp11 * fTemp29 / fTemp13;
-			fRec32[0] = fRec32[1] + 2.0f * fTemp30;
-			float fTemp31 = fRec32[1] + fTemp30;
-			float fTemp32 = fTemp11 * fTemp31;
-			fRec33[0] = fRec33[1] + 2.0f * fTemp32;
-			float fRec34 = fRec33[1] + fTemp32;
-			float fTemp33 = fTemp29 / fTemp13;
-			float fRec35 = fTemp33;
-			float fRec36 = fTemp31;
-			float fTemp34 = fRec35 + fRec34 * fTemp9 + fRec36 * fTemp10 / fRec15[0] - (fTemp7 * fRec28[1] + fRec29[1]);
-			float fTemp35 = fTemp6 * fTemp34 / fTemp8;
-			fRec28[0] = fRec28[1] + 2.0f * fTemp35;
-			float fTemp36 = fRec28[1] + fTemp35;
-			float fTemp37 = fTemp6 * fTemp36;
-			fRec29[0] = fRec29[1] + 2.0f * fTemp37;
-			float fRec30 = fTemp36;
-			float fTemp38 = fTemp34 / fTemp8;
-			float fRec31 = fTemp37 + fRec29[1] + fTemp38;
-			float fTemp39 = fRec31 + fRec30 * fTemp5 - (fTemp3 * fRec23[1] + fRec24[1]);
-			float fTemp40 = fTemp2 * fTemp39 / fTemp4;
-			fRec23[0] = fRec23[1] + 2.0f * fTemp40;
-			float fTemp41 = fRec23[1] + fTemp40;
-			float fTemp42 = fTemp2 * fTemp41;
-			fRec24[0] = fRec24[1] + 2.0f * fTemp42;
-			float fRec25 = fRec24[1] + fTemp42;
-			float fTemp43 = fTemp39 / fTemp4;
-			float fRec26 = fTemp43;
-			float fRec27 = fTemp41;
-			output1[i0] = static_cast<FAUSTFLOAT>(tanhf(fRec25 + fRec26 * fTemp0 + fRec27 * fTemp1 / fRec0[0]));
+			float fTemp29 = fRec4 + fRec5 * fTemp0 + fRec6 * fTemp1 / fRec0[0];
+			output0[i0] = static_cast<FAUSTFLOAT>(fSlow9 * fTemp29 + fSlow10 * tanhf(fTemp29));
+			float fTemp30 = static_cast<float>(input1[i0]) - (fTemp12 * fRec32[1] + fRec33[1]);
+			float fTemp31 = fTemp11 * fTemp30 / fTemp13;
+			fRec32[0] = fRec32[1] + 2.0f * fTemp31;
+			float fTemp32 = fRec32[1] + fTemp31;
+			float fTemp33 = fTemp11 * fTemp32;
+			fRec33[0] = fRec33[1] + 2.0f * fTemp33;
+			float fRec34 = fRec33[1] + fTemp33;
+			float fTemp34 = fTemp30 / fTemp13;
+			float fRec35 = fTemp34;
+			float fRec36 = fTemp32;
+			float fTemp35 = fRec35 + fRec34 * fTemp9 + fRec36 * fTemp10 / fRec15[0] - (fTemp7 * fRec28[1] + fRec29[1]);
+			float fTemp36 = fTemp6 * fTemp35 / fTemp8;
+			fRec28[0] = fRec28[1] + 2.0f * fTemp36;
+			float fTemp37 = fRec28[1] + fTemp36;
+			float fTemp38 = fTemp6 * fTemp37;
+			fRec29[0] = fRec29[1] + 2.0f * fTemp38;
+			float fRec30 = fTemp37;
+			float fTemp39 = fTemp35 / fTemp8;
+			float fRec31 = fTemp38 + fRec29[1] + fTemp39;
+			float fTemp40 = fRec31 + fRec30 * fTemp5 - (fTemp3 * fRec23[1] + fRec24[1]);
+			float fTemp41 = fTemp2 * fTemp40 / fTemp4;
+			fRec23[0] = fRec23[1] + 2.0f * fTemp41;
+			float fTemp42 = fRec23[1] + fTemp41;
+			float fTemp43 = fTemp2 * fTemp42;
+			fRec24[0] = fRec24[1] + 2.0f * fTemp43;
+			float fRec25 = fRec24[1] + fTemp43;
+			float fTemp44 = fTemp40 / fTemp4;
+			float fRec26 = fTemp44;
+			float fRec27 = fTemp42;
+			float fTemp45 = fRec25 + fRec26 * fTemp0 + fRec27 * fTemp1 / fRec0[0];
+			output1[i0] = static_cast<FAUSTFLOAT>(fSlow9 * fTemp45 + fSlow10 * tanhf(fTemp45));
 			fRec0[1] = fRec0[0];
 			fRec1[1] = fRec1[0];
 			fRec7[1] = fRec7[0];
