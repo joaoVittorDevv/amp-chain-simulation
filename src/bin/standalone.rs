@@ -1747,6 +1747,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} Hz", ui_eq_low_freq))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                         |ui| {
                             if ui
@@ -1758,6 +1763,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:+.1} dB", ui_eq_low_gain))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                         |ui| {
                             if ui
@@ -1769,6 +1779,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:.2}", ui_eq_low_q))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                     );
 
@@ -1790,6 +1805,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} Hz", ui_eq_mid_freq))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                         |ui| {
                             if ui
@@ -1801,6 +1821,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:+.1} dB", ui_eq_mid_gain))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                         |ui| {
                             if ui
@@ -1812,6 +1837,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:.2}", ui_eq_mid_q))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                     );
 
@@ -1833,6 +1863,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} Hz", ui_eq_high_freq))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                         |ui| {
                             if ui
@@ -1844,6 +1879,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:+.1} dB", ui_eq_high_gain))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                         |ui| {
                             if ui
@@ -1855,6 +1895,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 eq_changed.set(true);
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:.2}", ui_eq_high_q))
+                                    .small()
+                                    .monospace(),
+                            );
                         },
                     );
 
@@ -1894,6 +1939,11 @@ impl eframe::App for StandaloneApp {
                         {
                             changed = true;
                         }
+                        ui.label(
+                            egui::RichText::new(format!("{:.2}", ui_neural_drive))
+                                .small()
+                                .monospace(),
+                        );
                     });
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
@@ -1912,6 +1962,11 @@ impl eframe::App for StandaloneApp {
                         {
                             changed = true;
                         }
+                        ui.label(
+                            egui::RichText::new(format!("{:.2}", ui_neural_output_gain))
+                                .small()
+                                .monospace(),
+                        );
                     });
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
@@ -1930,6 +1985,11 @@ impl eframe::App for StandaloneApp {
                         {
                             changed = true;
                         }
+                        ui.label(
+                            egui::RichText::new(format!("{:.2}", ui_neural_amp_volume))
+                                .small()
+                                .monospace(),
+                        );
                     });
                     ui.add_space(10.0);
                     ui.vertical(|ui| {
@@ -1943,6 +2003,11 @@ impl eframe::App for StandaloneApp {
                         {
                             changed = true;
                         }
+                        ui.label(
+                            egui::RichText::new(format!("{:.2}", ui_gain))
+                                .small()
+                                .monospace(),
+                        );
                     });
                 });
                 if changed {
@@ -1972,6 +2037,11 @@ impl eframe::App for StandaloneApp {
                                 {
                                     changed = true;
                                 }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.2}", ui_mlc_gain))
+                                        .small()
+                                        .monospace(),
+                                );
                             });
                             ui.vertical(|ui| {
                                 ui.label("Master");
@@ -1984,6 +2054,11 @@ impl eframe::App for StandaloneApp {
                                 {
                                     changed = true;
                                 }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.2}", ui_mlc_master))
+                                        .small()
+                                        .monospace(),
+                                );
                             });
                         });
                     });
@@ -2001,6 +2076,11 @@ impl eframe::App for StandaloneApp {
                                 {
                                     changed = true;
                                 }
+                                ui.label(
+                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_bass))
+                                        .small()
+                                        .monospace(),
+                                );
                             });
                             ui.vertical(|ui| {
                                 ui.label("Middle");
@@ -2018,6 +2098,11 @@ impl eframe::App for StandaloneApp {
                                 {
                                     changed = true;
                                 }
+                                ui.label(
+                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_middle))
+                                        .small()
+                                        .monospace(),
+                                );
                             });
                             ui.vertical(|ui| {
                                 ui.label("Treble");
@@ -2035,6 +2120,11 @@ impl eframe::App for StandaloneApp {
                                 {
                                     changed = true;
                                 }
+                                ui.label(
+                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_treble))
+                                        .small()
+                                        .monospace(),
+                                );
                             });
                         });
                     });
@@ -2057,6 +2147,11 @@ impl eframe::App for StandaloneApp {
                                 {
                                     changed = true;
                                 }
+                                ui.label(
+                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_presence))
+                                        .small()
+                                        .monospace(),
+                                );
                             });
                             ui.vertical(|ui| {
                                 ui.label("Depth");
@@ -2069,6 +2164,11 @@ impl eframe::App for StandaloneApp {
                                 {
                                     changed = true;
                                 }
+                                ui.label(
+                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_depth))
+                                        .small()
+                                        .monospace(),
+                                );
                             });
                         });
                     });
@@ -2146,6 +2246,11 @@ impl eframe::App for StandaloneApp {
                             {
                                 changed = true;
                             }
+                            ui.label(
+                                egui::RichText::new(format!("{:.0} dB", ui_mlc_gate))
+                                    .small()
+                                    .monospace(),
+                            );
                         });
                     });
                 });

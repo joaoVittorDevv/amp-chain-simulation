@@ -371,6 +371,15 @@ impl Plugin for BaseIO {
                     if response.drag_stopped() {
                         setter.end_set_parameter(param);
                     }
+
+                    // Absolute runtime value the DSP used on the last audio callback.
+                    let actual = param.smoothed.previous_value();
+                    ui.label(
+                        egui::RichText::new(format!("{:.2}", actual))
+                            .small()
+                            .monospace(),
+                    );
+
                     response
                 };
 
