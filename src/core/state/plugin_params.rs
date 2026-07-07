@@ -164,6 +164,24 @@ pub struct BaseIOParams {
     #[id = "mlc_clip_type"]
     pub mlc_clip_type: EnumParam<ClipType>,
 
+    #[id = "mlc_tight"]
+    pub mlc_tight: BoolParam,
+
+    #[id = "mlc_asymmetry_enable"]
+    pub mlc_asymmetry_enable: BoolParam,
+
+    #[id = "mlc_asymmetry"]
+    pub mlc_asymmetry: FloatParam,
+
+    #[id = "mlc_preshape"]
+    pub mlc_preshape: BoolParam,
+
+    #[id = "mlc_preshape_tight"]
+    pub mlc_preshape_tight: FloatParam,
+
+    #[id = "mlc_preshape_bite"]
+    pub mlc_preshape_bite: FloatParam,
+
     // --- Cabinet IR ---
     #[id = "cab_bypass"]
     pub cabinet_bypass: BoolParam,
@@ -426,6 +444,33 @@ impl Default for BaseIOParams {
             mlc_feedback: EnumParam::new("MLC Feedback", MlcFeedback::Hi),
             mlc_gate_pos: EnumParam::new("MLC Gate Pos", MlcGatePos::Pre),
             mlc_clip_type: EnumParam::new("MLC Clip Type", ClipType::AsymmetricTanh),
+
+            mlc_tight: BoolParam::new("Tight", true),
+            mlc_asymmetry_enable: BoolParam::new("Asymmetry Enable", true),
+            mlc_asymmetry: FloatParam::new(
+                "Asymmetry",
+                0.5,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_preshape: BoolParam::new("Pre-Shape", false),
+            mlc_preshape_tight: FloatParam::new(
+                "Pre-Shape Tight",
+                -3.0,
+                FloatRange::Linear { min: -6.0, max: 0.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            mlc_preshape_bite: FloatParam::new(
+                "Pre-Shape Bite",
+                3.0,
+                FloatRange::Linear { min: 0.0, max: 6.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
 
             // --- Cabinet IR defaults ---
             cabinet_bypass: BoolParam::new("Cabinet Bypass", false),

@@ -86,6 +86,31 @@ fn param_knob_unit(
     });
 }
 
+/// Horizontal slider bound to a `FloatParam`, for continuous 0..1-style controls
+/// that read better as a bar than a knob (e.g. the even/odd harmonics balance).
+fn param_slider(ui: &mut egui::Ui, setter: &ParamSetter, label: &str, param: &FloatParam) {
+    let mut value = param.value();
+    let (min, max) = match param.range() {
+        nih_plug::prelude::FloatRange::Linear { min, max } => (min, max),
+        nih_plug::prelude::FloatRange::Skewed { min, max, .. } => (min, max),
+        _ => (0.0, 1.0),
+    };
+    let response = ui.add(
+        egui::Slider::new(&mut value, min..=max)
+            .text(label)
+            .show_value(false),
+    );
+    if response.drag_started() {
+        setter.begin_set_parameter(param);
+    }
+    if response.changed() {
+        setter.set_parameter(param, value);
+    }
+    if response.drag_stopped() {
+        setter.end_set_parameter(param);
+    }
+}
+
 fn bool_switch(ui: &mut egui::Ui, setter: &ParamSetter, label: &str, param: &BoolParam) {
     let mut value = param.value();
     if ui.checkbox(&mut value, label).changed() {
@@ -181,6 +206,38 @@ pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &A
                             .color(egui::Color32::GRAY),
                     );
                     clip_type_combo(ui, setter, &params.mlc_clip_type);
+                });
+            });
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Tight").strong());
+            ui.horizontal(|ui| {
+                bool_switch(ui, setter, "Enable", &params.mlc_tight);
+                ui.label(
+                    egui::RichText::new("HPF 80Hz entre estágios")
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
+            });
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Harmonics").strong());
+            ui.vertical(|ui| {
+                bool_switch(ui, setter, "Enable", &params.mlc_asymmetry_enable);
+                ui.horizontal(|ui| {
+                    ui.label("odd");
+                    param_slider(ui, setter, "Asymmetry", &params.mlc_asymmetry);
+                    ui.label("even");
+                });
+            });
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Pre-Shape").strong());
+            ui.vertical(|ui| {
+                bool_switch(ui, setter, "Enable", &params.mlc_preshape);
+                ui.horizontal(|ui| {
+                    param_knob(ui, setter, "Tight", &params.mlc_preshape_tight);
+                    param_knob(ui, setter, "Bite", &params.mlc_preshape_bite);
                 });
             });
         });

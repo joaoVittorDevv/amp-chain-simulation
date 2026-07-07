@@ -109,6 +109,12 @@ struct MlcBlockParams {
     feedback: f32,
     gate_pos: f32,
     clip_type: f32,
+    tight: f32,
+    asymmetry_enable: f32,
+    asymmetry: f32,
+    preshape: f32,
+    preshape_tight: f32,
+    preshape_bite: f32,
 }
 
 #[inline(always)]
@@ -127,6 +133,12 @@ fn configure_mlc(mlc: &mut MlcZeroVProcessor, params: MlcBlockParams) {
     mlc.set_feedback(params.feedback);
     mlc.set_gate_pos(params.gate_pos);
     mlc.set_clip_type(params.clip_type);
+    mlc.set_tight(params.tight);
+    mlc.set_asymmetry_enable(params.asymmetry_enable);
+    mlc.set_asymmetry(params.asymmetry);
+    mlc.set_preshape(params.preshape);
+    mlc.set_preshape_tight(params.preshape_tight);
+    mlc.set_preshape_bite(params.preshape_bite);
 }
 
 pub struct BaseIO {
@@ -871,6 +883,20 @@ impl Plugin for BaseIO {
                 MlcGatePos::Post => 1.0,
             },
             clip_type: self.params.mlc_clip_type.value().as_f32(),
+            tight: if self.params.mlc_tight.value() { 1.0 } else { 0.0 },
+            asymmetry_enable: if self.params.mlc_asymmetry_enable.value() {
+                1.0
+            } else {
+                0.0
+            },
+            asymmetry: self.params.mlc_asymmetry.smoothed.next(),
+            preshape: if self.params.mlc_preshape.value() {
+                1.0
+            } else {
+                0.0
+            },
+            preshape_tight: self.params.mlc_preshape_tight.smoothed.next(),
+            preshape_bite: self.params.mlc_preshape_bite.smoothed.next(),
         };
         let eq_active = self.params.eq_active.value();
         let eq_tanh_bypass = self.params.eq_tanh_bypass.value();

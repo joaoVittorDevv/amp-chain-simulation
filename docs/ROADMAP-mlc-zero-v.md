@@ -11,10 +11,10 @@
 
 | # | Melhoria | Status | Linhas | Descrição |
 |---|---|---|---|---|
-| 1.1 | **Oversampling 4×** | ⬜ | 1 | `declare options "-os 4"` no `.dsp` — elimina aliasing |
-| 1.2 | **Tight (HPF entre stages)** | ⬜ | 3 | Highpass 80Hz entre stage1→stage2 — remove "lama" |
-| 1.3 | **Asymmetry slider** | ⬜ | 5 | Controle 0–1 do bias no `clip_atanh` — par/ímpar variável |
-| 1.4 | **Pre-Shape EQ** | ⬜ | 8 | Low shelf 150Hz + peak 1kHz antes do `gain_stages` |
+| 1.1 | **Oversampling 4×** | ⬜ (→Tier 2) | ~20 | Faust 2.85.1 não suporta `declare options "-os 4"` — precisa de plugin-level ou DSP manual |
+| 1.2 | **Tight (HPF entre stages)** | ✅ | 3 | Highpass 80Hz entre stage1→stage2 — remove "lama" |
+| 1.3 | **Asymmetry slider** | ✅ | 5 | Controle 0–1 do bias no `clip_atanh` — par/ímpar variável |
+| 1.4 | **Pre-Shape EQ** | ✅ | 8 | Low shelf 150Hz + peak 1kHz antes do `gain_stages` |
 | 1.5 | **Multi-clipping** | ✅ | ~600 | 11 curvas → 2 (Asymmetric Tanh + Exponential) |
 | 1.6 | **Limiter default -0.2 dB** | ✅ | 1 | Ajuste de ceiling padrão |
 
@@ -24,6 +24,7 @@
 
 | # | Melhoria | Status | Linhas | Descrição |
 |---|---|---|---|---|
+| 2.0 | **Oversampling 4×** | ⬜ | ~20 | Plugin-level (nih_plug) ou DSP manual (`ba.oversampling`) — Faust 2.85.1 nativo não suporta |
 | 2.1 | **Clean Blend** | ⬜ | 15 | Split input → caminho limpo filtrado + saturado → mix 0–25% |
 | 2.2 | **Tone stack real** | ⬜ | 10 | Substituir tone stack genérico por `tonestacks.lib` (24 modelos) |
 | 2.3 | **Sag de power amp** | ⬜ | 20 | Envelope follower → redução de headroom no ataque |
@@ -85,6 +86,7 @@
 |---|---|---|
 | 2026-07-07 | 11 curvas de clipagem → selecionáveis | `8c0b070` |
 | 2026-07-07 | Refinamento: 2 curvas + limiter -0.2 + docs | `049e36b`, `22a79d5` |
+| 2026-07-07 | Tier 1: Tight, Harmonics (asymmetry), Pre-Shape (3/4) | `ccb830c`..`9bcf231` (6 commits) — oversampling movido p/ Tier 2 |
 | 2026-07-07 | Pesquisa: topologias, pedais, DSP avançado | `docs/REF-clipping-curves.md`, `docs/dsp-advanced-techniques-report.md` |
 
 ---

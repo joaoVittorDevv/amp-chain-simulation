@@ -17,9 +17,20 @@ feedback = nentry("Feedback", 1.0, 0.0, 1.0, 1.0);
 gate_pos = nentry("Gate Pos", 0.0, 0.0, 1.0, 1.0);
 clip_type = nentry("Clip Type", 0, 0, 1, 1);
 
+// --- Tier 1 gain-staging controls ---
+tight = nentry("Tight", 1, 0, 1, 1);
+asymmetry_enable = nentry("Asymmetry Enable", 1, 0, 1, 1);
+asymmetry = nentry("Asymmetry", 0.5, 0, 1, 0.01);
+preshape = nentry("Pre-Shape", 0, 0, 1, 1);
+preshape_tight = nentry("Pre-Shape Tight", -3, -6, 0, 0.1);
+preshape_bite = nentry("Pre-Shape Bite", 3, 0, 6, 0.1);
+
 // --- Selectable clipping / saturation curves ---
 // 0  Asymmetric Tanh     - DC bias, even harmonics (default)
-clip_atanh(x) = ma.tanh(x + 0.25) - ma.tanh(0.25);
+//    Asymmetry slider drives the DC bias (0 = symmetric tanh, 1 = strong even harmonics).
+clip_atanh(x) = ba.if(asymmetry_enable > 0.5,
+    ma.tanh(x + asymmetry * 0.5) - ma.tanh(asymmetry * 0.5),
+    ma.tanh(x));
 // 1  Exponential         - very aggressive (RAT/DS-1 voicing)
 clip_exp(x)   = (1.0 - exp(0.0 - abs(x))) * ba.if(x > 0, 1.0, ba.if(x < 0, -1.0, 0.0));
 
@@ -39,7 +50,18 @@ drive = 8.0 + gain * 72.0;
 stage1 = *(drive * 0.22 * bright_gain * m45_trim) : clip : *(0.78);
 stage2 = *(drive * 0.34 * m45_trim) : +(0.03) : clip : *(0.68);
 stage3 = *(drive * 0.46) : clip : *(0.62);
-gain_stages = stage1 : stage2 : stage3;
+
+// Pre-Shape EQ before the gain stages. When preshape = 0 both gains collapse to
+// 0 dB so the block is a no-op; preshape = 1 applies the configured cut/boost.
+pre_shape(x) = x
+    : filters.low_shelf(preshape * preshape_tight, 150, 0.7)
+    : filters.peak_eq(preshape * preshape_bite, 1000, 0.8);
+
+// Tight HPF (80 Hz) inserted between stage1 and stage2 to keep the low end
+// firm before the second round of gain. Bypassed when tight <= 0.5.
+tight_hpf(x) = ba.if(tight > 0.5, x : filters.hp(80, 0.707), x);
+
+gain_stages = pre_shape : stage1 : tight_hpf : stage2 : stage3;
 
 tone_stack =
     filters.low_shelf(bass, 120.0, 0.707)

@@ -84,6 +84,12 @@ struct StandaloneState {
     mlc_feedback: MlcFeedback,
     mlc_gate_pos: MlcGatePos,
     mlc_clip_type: ClipType,
+    mlc_tight: bool,
+    mlc_asymmetry_enable: bool,
+    mlc_asymmetry: f32,
+    mlc_preshape: bool,
+    mlc_preshape_tight: f32,
+    mlc_preshape_bite: f32,
     eq_tanh_bypass: bool,
     gain: f32,
     bypass: bool,
@@ -130,6 +136,12 @@ impl Default for StandaloneState {
             mlc_feedback: MlcFeedback::Hi,
             mlc_gate_pos: MlcGatePos::Pre,
             mlc_clip_type: ClipType::AsymmetricTanh,
+            mlc_tight: true,
+            mlc_asymmetry_enable: true,
+            mlc_asymmetry: 0.5,
+            mlc_preshape: false,
+            mlc_preshape_tight: -3.0,
+            mlc_preshape_bite: 3.0,
             eq_tanh_bypass: false,
             gain: 1.0,
             bypass: false,
@@ -177,6 +189,12 @@ struct AudioSnapshot {
     mlc_feedback: MlcFeedback,
     mlc_gate_pos: MlcGatePos,
     mlc_clip_type: ClipType,
+    mlc_tight: bool,
+    mlc_asymmetry_enable: bool,
+    mlc_asymmetry: f32,
+    mlc_preshape: bool,
+    mlc_preshape_tight: f32,
+    mlc_preshape_bite: f32,
     eq_tanh_bypass: bool,
     gain: f32,
     bypass: bool,
@@ -220,6 +238,12 @@ impl StandaloneState {
             mlc_feedback: self.mlc_feedback,
             mlc_gate_pos: self.mlc_gate_pos,
             mlc_clip_type: self.mlc_clip_type,
+            mlc_tight: self.mlc_tight,
+            mlc_asymmetry_enable: self.mlc_asymmetry_enable,
+            mlc_asymmetry: self.mlc_asymmetry,
+            mlc_preshape: self.mlc_preshape,
+            mlc_preshape_tight: self.mlc_preshape_tight,
+            mlc_preshape_bite: self.mlc_preshape_bite,
             eq_tanh_bypass: self.eq_tanh_bypass,
             gain: self.gain,
             bypass: self.bypass,
@@ -276,6 +300,9 @@ fn process_standalone_amp(
                 MlcGatePos::Post => 1.0,
             };
             let clip_type = snap.mlc_clip_type.as_f32();
+            let tight = if snap.mlc_tight { 1.0 } else { 0.0 };
+            let asymmetry_enable = if snap.mlc_asymmetry_enable { 1.0 } else { 0.0 };
+            let preshape = if snap.mlc_preshape { 1.0 } else { 0.0 };
             if let Some(mlc) = mlc_l {
                 mlc.set_gain(snap.mlc_gain);
                 mlc.set_master(snap.mlc_master);
@@ -291,6 +318,12 @@ fn process_standalone_amp(
                 mlc.set_feedback(feedback);
                 mlc.set_gate_pos(gate_pos);
                 mlc.set_clip_type(clip_type);
+                mlc.set_tight(tight);
+                mlc.set_asymmetry_enable(asymmetry_enable);
+                mlc.set_asymmetry(snap.mlc_asymmetry);
+                mlc.set_preshape(preshape);
+                mlc.set_preshape_tight(snap.mlc_preshape_tight);
+                mlc.set_preshape_bite(snap.mlc_preshape_bite);
                 mlc.process_block(buf_l.as_mut_ptr(), buf_l.len());
             }
             if let Some(mlc) = mlc_r {
@@ -308,6 +341,12 @@ fn process_standalone_amp(
                 mlc.set_feedback(feedback);
                 mlc.set_gate_pos(gate_pos);
                 mlc.set_clip_type(clip_type);
+                mlc.set_tight(tight);
+                mlc.set_asymmetry_enable(asymmetry_enable);
+                mlc.set_asymmetry(snap.mlc_asymmetry);
+                mlc.set_preshape(preshape);
+                mlc.set_preshape_tight(snap.mlc_preshape_tight);
+                mlc.set_preshape_bite(snap.mlc_preshape_bite);
                 mlc.process_block(buf_r.as_mut_ptr(), buf_r.len());
             }
         }
@@ -1700,6 +1739,9 @@ impl eframe::App for StandaloneApp {
         let mut ui_mlc_presence = snap_ui.mlc_presence;
         let mut ui_mlc_depth = snap_ui.mlc_depth;
         let mut ui_mlc_gate = snap_ui.mlc_gate;
+        let mut ui_mlc_asymmetry = snap_ui.mlc_asymmetry;
+        let mut ui_mlc_preshape_tight = snap_ui.mlc_preshape_tight;
+        let mut ui_mlc_preshape_bite = snap_ui.mlc_preshape_bite;
         let mut ui_limiter_enable = snap_ui.limiter_enable;
         let mut ui_limiter_ceiling = snap_ui.limiter_ceiling;
         let mut ui_limiter_release = snap_ui.limiter_release;
@@ -2301,6 +2343,109 @@ impl eframe::App for StandaloneApp {
                         }
                     });
                     ui.group(|ui| {
+                        ui.label(egui::RichText::new("Tight").strong());
+                        let mut tight = snap_ui.mlc_tight;
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut tight, "Enable").changed() {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_tight = tight;
+                                }
+                            }
+                            ui.label(
+                                egui::RichText::new("HPF 80Hz entre estágios")
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            );
+                        });
+                    });
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new("Harmonics").strong());
+                        let mut asymmetry_enable = snap_ui.mlc_asymmetry_enable;
+                        ui.vertical(|ui| {
+                            if ui.checkbox(&mut asymmetry_enable, "Enable").changed() {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_asymmetry_enable = asymmetry_enable;
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("odd");
+                                if ui
+                                    .add(egui::Slider::new(&mut ui_mlc_asymmetry, 0.0..=1.0))
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.label("even");
+                            });
+                        });
+                    });
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new("Pre-Shape").strong());
+                        let mut preshape = snap_ui.mlc_preshape;
+                        ui.vertical(|ui| {
+                            if ui.checkbox(&mut preshape, "Enable").changed() {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_preshape = preshape;
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label("Tight");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_preshape_tight,
+                                                -6.0,
+                                                0.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{:+.1} dB",
+                                            ui_mlc_preshape_tight
+                                        ))
+                                        .small()
+                                        .monospace(),
+                                    );
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label("Bite");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_preshape_bite,
+                                                0.0,
+                                                6.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{:+.1} dB",
+                                            ui_mlc_preshape_bite
+                                        ))
+                                        .small()
+                                        .monospace(),
+                                    );
+                                });
+                            });
+                        });
+                    });
+                    ui.group(|ui| {
                         ui.label(egui::RichText::new("Gate").strong());
                         ui.vertical(|ui| {
                             ui.label("Threshold");
@@ -2394,6 +2539,9 @@ impl eframe::App for StandaloneApp {
                         st.mlc_presence = ui_mlc_presence;
                         st.mlc_depth = ui_mlc_depth;
                         st.mlc_gate = ui_mlc_gate;
+                        st.mlc_asymmetry = ui_mlc_asymmetry;
+                        st.mlc_preshape_tight = ui_mlc_preshape_tight;
+                        st.mlc_preshape_bite = ui_mlc_preshape_bite;
                         st.limiter_enable = ui_limiter_enable;
                         st.limiter_ceiling = ui_limiter_ceiling;
                         st.limiter_release = ui_limiter_release;

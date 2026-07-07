@@ -118,5 +118,11 @@ void mlc_zero_v_set_warclaw(FaustHandle handle, float value) { MLC_SET_PARAM("WA
 void mlc_zero_v_set_feedback(FaustHandle handle, float value) { MLC_SET_PARAM("Feedback", value); }
 void mlc_zero_v_set_gate_pos(FaustHandle handle, float value) { MLC_SET_PARAM("Gate Pos", value); }
 void mlc_zero_v_set_clip_type(FaustHandle handle, float value) { MLC_SET_PARAM("Clip Type", value); }
+void mlc_zero_v_set_tight(FaustHandle handle, float value) { MLC_SET_PARAM("Tight", value); }
+void mlc_zero_v_set_asymmetry_enable(FaustHandle handle, float value) { MLC_SET_PARAM("Asymmetry Enable", value); }
+void mlc_zero_v_set_asymmetry(FaustHandle handle, float value) { MLC_SET_PARAM("Asymmetry", value); }
+void mlc_zero_v_set_preshape(FaustHandle handle, float value) { MLC_SET_PARAM("Pre-Shape", value); }
+void mlc_zero_v_set_preshape_tight(FaustHandle handle, float value) { MLC_SET_PARAM("Pre-Shape Tight", value); }
+void mlc_zero_v_set_preshape_bite(FaustHandle handle, float value) { MLC_SET_PARAM("Pre-Shape Bite", value); }
 
 }

@@ -12,7 +12,7 @@ use crate::lab::{DspVariant, ParameterMeta};
 #[cfg(feature = "lab")]
 pub const MLC_ZERO_V_IMPL_ID: &str = "mlc-zero-v";
 #[cfg(feature = "lab")]
-pub const MLC_ZERO_V_PARAM_IDS: [&str; 14] = [
+pub const MLC_ZERO_V_PARAM_IDS: [&str; 20] = [
     "mlc_gain",
     "mlc_master",
     "mlc_bass",
@@ -27,6 +27,12 @@ pub const MLC_ZERO_V_PARAM_IDS: [&str; 14] = [
     "mlc_feedback",
     "mlc_gate_pos",
     "mlc_clip_type",
+    "mlc_tight",
+    "mlc_asymmetry_enable",
+    "mlc_asymmetry",
+    "mlc_preshape",
+    "mlc_preshape_tight",
+    "mlc_preshape_bite",
 ];
 
 pub struct MlcZeroVProcessor {
@@ -46,6 +52,12 @@ pub struct MlcZeroVProcessor {
     feedback: f32,
     gate_pos: f32,
     clip_type: f32,
+    tight: f32,
+    asymmetry_enable: f32,
+    asymmetry: f32,
+    preshape: f32,
+    preshape_tight: f32,
+    preshape_bite: f32,
 }
 
 impl MlcZeroVProcessor {
@@ -71,6 +83,12 @@ impl MlcZeroVProcessor {
                 feedback: 1.0,
                 gate_pos: 0.0,
                 clip_type: 0.0,
+                tight: 1.0,
+                asymmetry_enable: 1.0,
+                asymmetry: 0.5,
+                preshape: 0.0,
+                preshape_tight: -3.0,
+                preshape_bite: 3.0,
             })
         }
     }
@@ -131,6 +149,30 @@ impl MlcZeroVProcessor {
     pub fn set_clip_type(&mut self, value: f32) {
         self.clip_type = value.clamp(0.0, 1.0).round();
     }
+    #[inline(always)]
+    pub fn set_tight(&mut self, value: f32) {
+        self.tight = value.clamp(0.0, 1.0).round();
+    }
+    #[inline(always)]
+    pub fn set_asymmetry_enable(&mut self, value: f32) {
+        self.asymmetry_enable = value.clamp(0.0, 1.0).round();
+    }
+    #[inline(always)]
+    pub fn set_asymmetry(&mut self, value: f32) {
+        self.asymmetry = value.clamp(0.0, 1.0);
+    }
+    #[inline(always)]
+    pub fn set_preshape(&mut self, value: f32) {
+        self.preshape = value.clamp(0.0, 1.0).round();
+    }
+    #[inline(always)]
+    pub fn set_preshape_tight(&mut self, value: f32) {
+        self.preshape_tight = value.clamp(-6.0, 0.0);
+    }
+    #[inline(always)]
+    pub fn set_preshape_bite(&mut self, value: f32) {
+        self.preshape_bite = value.clamp(0.0, 6.0);
+    }
 }
 
 impl Drop for MlcZeroVProcessor {
@@ -173,6 +215,12 @@ impl ExternalProcessor for MlcZeroVProcessor {
             mlc_zero_v_set_feedback(self.handle, self.feedback);
             mlc_zero_v_set_gate_pos(self.handle, self.gate_pos);
             mlc_zero_v_set_clip_type(self.handle, self.clip_type);
+            mlc_zero_v_set_tight(self.handle, self.tight);
+            mlc_zero_v_set_asymmetry_enable(self.handle, self.asymmetry_enable);
+            mlc_zero_v_set_asymmetry(self.handle, self.asymmetry);
+            mlc_zero_v_set_preshape(self.handle, self.preshape);
+            mlc_zero_v_set_preshape_tight(self.handle, self.preshape_tight);
+            mlc_zero_v_set_preshape_bite(self.handle, self.preshape_bite);
             mlc_zero_v_process(self.handle, buffer, length as _);
         }
     }
@@ -193,6 +241,12 @@ impl ExternalProcessor for MlcZeroVProcessor {
             "mlc_feedback" => Some(self.feedback),
             "mlc_gate_pos" => Some(self.gate_pos),
             "mlc_clip_type" => Some(self.clip_type),
+            "mlc_tight" => Some(self.tight),
+            "mlc_asymmetry_enable" => Some(self.asymmetry_enable),
+            "mlc_asymmetry" => Some(self.asymmetry),
+            "mlc_preshape" => Some(self.preshape),
+            "mlc_preshape_tight" => Some(self.preshape_tight),
+            "mlc_preshape_bite" => Some(self.preshape_bite),
             _ => None,
         }
     }
@@ -213,6 +267,12 @@ impl ExternalProcessor for MlcZeroVProcessor {
             "mlc_feedback" => self.set_feedback(enum_value(value)),
             "mlc_gate_pos" => self.set_gate_pos(enum_value(value)),
             "mlc_clip_type" => self.set_clip_type(value),
+            "mlc_tight" => self.set_tight(value),
+            "mlc_asymmetry_enable" => self.set_asymmetry_enable(value),
+            "mlc_asymmetry" => self.set_asymmetry(value),
+            "mlc_preshape" => self.set_preshape(value),
+            "mlc_preshape_tight" => self.set_preshape_tight(value),
+            "mlc_preshape_bite" => self.set_preshape_bite(value),
             _ => return false,
         }
         true
@@ -323,6 +383,30 @@ fn mlc_zero_v_param_metadata() -> Vec<ParameterMeta> {
         ("mlc_feedback", "MLC Feedback", (0.0, 1.0), 1.0, None),
         ("mlc_gate_pos", "MLC Gate Pos", (0.0, 1.0), 0.0, None),
         ("mlc_clip_type", "MLC Clip Type", (0.0, 1.0), 0.0, None),
+        ("mlc_tight", "MLC Tight", (0.0, 1.0), 1.0, None),
+        (
+            "mlc_asymmetry_enable",
+            "MLC Asymmetry Enable",
+            (0.0, 1.0),
+            1.0,
+            None,
+        ),
+        ("mlc_asymmetry", "MLC Asymmetry", (0.0, 1.0), 0.5, None),
+        ("mlc_preshape", "MLC Pre-Shape", (0.0, 1.0), 0.0, None),
+        (
+            "mlc_preshape_tight",
+            "MLC Pre-Shape Tight",
+            (-6.0, 0.0),
+            -3.0,
+            Some("dB"),
+        ),
+        (
+            "mlc_preshape_bite",
+            "MLC Pre-Shape Bite",
+            (0.0, 6.0),
+            3.0,
+            Some("dB"),
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -364,6 +448,22 @@ mod tests {
         assert_eq!(processor.get_param("mlc_clip_type"), Some(1.0));
         assert!(processor.set_param("mlc_clip_type", 42.0));
         assert_eq!(processor.get_param("mlc_clip_type"), Some(1.0));
+
+        // Tier 1 gain-staging params.
+        assert!(processor.set_param("mlc_asymmetry", 0.75));
+        assert_eq!(processor.get_param("mlc_asymmetry"), Some(0.75));
+
+        // Toggles quantize to 0/1.
+        assert!(processor.set_param("mlc_tight", 0.0));
+        assert_eq!(processor.get_param("mlc_tight"), Some(0.0));
+        assert!(processor.set_param("mlc_preshape", 1.0));
+        assert_eq!(processor.get_param("mlc_preshape"), Some(1.0));
+
+        // Pre-Shape gains clamp to their configured ranges.
+        assert!(processor.set_param("mlc_preshape_tight", -10.0));
+        assert_eq!(processor.get_param("mlc_preshape_tight"), Some(-6.0));
+        assert!(processor.set_param("mlc_preshape_bite", 42.0));
+        assert_eq!(processor.get_param("mlc_preshape_bite"), Some(6.0));
 
         assert_eq!(processor.get_param("missing"), None);
     }
