@@ -69,30 +69,35 @@ pub fn render_shared_panels(
         egui::TopBottomPanel::bottom("plugin_panel")
             .resizable(true)
             .min_height(110.0)
-            .show(ctx, |ui| match *active_panel {
-                ActivePanel::EQ => {
-                    ui.heading("🎛 Parametric EQ (Faust)");
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        draw_eq_controls(ui);
+            .max_height(ctx.available_rect().height() * 0.7)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| match *active_panel {
+                        ActivePanel::EQ => {
+                            ui.heading("🎛 Parametric EQ (Faust)");
+                            ui.separator();
+                            ui.horizontal_wrapped(|ui| {
+                                draw_eq_controls(ui);
+                            });
+                        }
+                        ActivePanel::NeuralAmp => {
+                            ui.heading("🧠 Neural Amp (Mojo)");
+                            ui.separator();
+                            ui.horizontal_wrapped(|ui| {
+                                draw_neural_controls(ui);
+                            });
+                        }
+                        ActivePanel::MlcZeroV => {
+                            ui.heading("MLC ZERO V Signature");
+                            ui.separator();
+                            draw_mlc_controls(ui);
+                        }
+                        ActivePanel::Cabinet => {
+                            draw_cabinet_controls(ui);
+                        }
+                        ActivePanel::None => {}
                     });
-                }
-                ActivePanel::NeuralAmp => {
-                    ui.heading("🧠 Neural Amp (Mojo)");
-                    ui.separator();
-                    ui.horizontal_wrapped(|ui| {
-                        draw_neural_controls(ui);
-                    });
-                }
-                ActivePanel::MlcZeroV => {
-                    ui.heading("MLC ZERO V Signature");
-                    ui.separator();
-                    draw_mlc_controls(ui);
-                }
-                ActivePanel::Cabinet => {
-                    draw_cabinet_controls(ui);
-                }
-                ActivePanel::None => {}
             });
     }
 

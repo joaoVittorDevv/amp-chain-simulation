@@ -3,7 +3,9 @@ use cpal::Stream;
 use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, ExternalProcessor};
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
-use distortion::core::state::plugin_params::{AmpModel, MlcBright, MlcFeedback, MlcGatePos};
+use distortion::core::state::plugin_params::{
+    AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos,
+};
 #[cfg(feature = "lab")]
 use distortion::core::ui::{draw_lab_panel, LabUiState};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
@@ -81,6 +83,7 @@ struct StandaloneState {
     mlc_warclaw: bool,
     mlc_feedback: MlcFeedback,
     mlc_gate_pos: MlcGatePos,
+    mlc_clip_type: ClipType,
     eq_tanh_bypass: bool,
     gain: f32,
     bypass: bool,
@@ -126,6 +129,7 @@ impl Default for StandaloneState {
             mlc_warclaw: false,
             mlc_feedback: MlcFeedback::Hi,
             mlc_gate_pos: MlcGatePos::Pre,
+            mlc_clip_type: ClipType::Tanh,
             eq_tanh_bypass: false,
             gain: 1.0,
             bypass: false,
@@ -172,6 +176,7 @@ struct AudioSnapshot {
     mlc_warclaw: bool,
     mlc_feedback: MlcFeedback,
     mlc_gate_pos: MlcGatePos,
+    mlc_clip_type: ClipType,
     eq_tanh_bypass: bool,
     gain: f32,
     bypass: bool,
@@ -214,6 +219,7 @@ impl StandaloneState {
             mlc_warclaw: self.mlc_warclaw,
             mlc_feedback: self.mlc_feedback,
             mlc_gate_pos: self.mlc_gate_pos,
+            mlc_clip_type: self.mlc_clip_type,
             eq_tanh_bypass: self.eq_tanh_bypass,
             gain: self.gain,
             bypass: self.bypass,
@@ -269,6 +275,7 @@ fn process_standalone_amp(
                 MlcGatePos::Pre => 0.0,
                 MlcGatePos::Post => 1.0,
             };
+            let clip_type = snap.mlc_clip_type.as_f32();
             if let Some(mlc) = mlc_l {
                 mlc.set_gain(snap.mlc_gain);
                 mlc.set_master(snap.mlc_master);
@@ -283,6 +290,7 @@ fn process_standalone_amp(
                 mlc.set_warclaw(snap.mlc_warclaw);
                 mlc.set_feedback(feedback);
                 mlc.set_gate_pos(gate_pos);
+                mlc.set_clip_type(clip_type);
                 mlc.process_block(buf_l.as_mut_ptr(), buf_l.len());
             }
             if let Some(mlc) = mlc_r {
@@ -299,6 +307,7 @@ fn process_standalone_amp(
                 mlc.set_warclaw(snap.mlc_warclaw);
                 mlc.set_feedback(feedback);
                 mlc.set_gate_pos(gate_pos);
+                mlc.set_clip_type(clip_type);
                 mlc.process_block(buf_r.as_mut_ptr(), buf_r.len());
             }
         }
@@ -2270,6 +2279,35 @@ impl eframe::App for StandaloneApp {
                         }
                     });
                     ui.group(|ui| {
+                        ui.label(egui::RichText::new("Clipping").strong());
+                        let mut clip_type = snap_ui.mlc_clip_type;
+                        ui.vertical(|ui| {
+                            egui::ComboBox::from_id_salt("standalone_mlc_clip_type")
+                                .width(200.0)
+                                .selected_text(clip_type.label())
+                                .show_ui(ui, |ui| {
+                                    for clip in ClipType::ALL {
+                                        ui.selectable_value(
+                                            &mut clip_type,
+                                            clip,
+                                            clip.description(),
+                                        );
+                                    }
+                                });
+                            ui.label(
+                                egui::RichText::new(clip_type.description())
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            );
+                        });
+                        if clip_type != snap_ui.mlc_clip_type {
+                            changed = true;
+                            if let Ok(mut st) = self.standalone_state.lock() {
+                                st.mlc_clip_type = clip_type;
+                            }
+                        }
+                    });
+                    ui.group(|ui| {
                         ui.label(egui::RichText::new("Gate").strong());
                         ui.vertical(|ui| {
                             ui.label("Threshold");
@@ -2552,7 +2590,9 @@ impl eframe::App for StandaloneApp {
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1000.0, 500.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1200.0, 800.0])
+            .with_min_inner_size([1000.0, 700.0]),
         ..Default::default()
     };
     eframe::run_native(

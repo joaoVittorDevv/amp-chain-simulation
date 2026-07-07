@@ -1,4 +1,6 @@
-use crate::core::state::plugin_params::{BaseIOParams, MlcBright, MlcFeedback, MlcGatePos};
+use crate::core::state::plugin_params::{
+    BaseIOParams, ClipType, MlcBright, MlcFeedback, MlcGatePos,
+};
 use nih_plug::prelude::{BoolParam, EnumParam, FloatParam, ParamSetter};
 use nih_plug_egui::egui;
 use std::sync::Arc;
@@ -147,6 +149,23 @@ fn gate_pos_switch(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<Ml
     }
 }
 
+fn clip_type_combo(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<ClipType>) {
+    let mut value = param.value();
+    egui::ComboBox::from_id_salt("mlc_clip_type_combo")
+        .width(200.0)
+        .selected_text(value.label())
+        .show_ui(ui, |ui| {
+            for clip in ClipType::ALL {
+                ui.selectable_value(&mut value, clip, clip.description());
+            }
+        });
+    if value != param.value() {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, value);
+        setter.end_set_parameter(param);
+    }
+}
+
 pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &Arc<BaseIOParams>) {
     ui.horizontal_wrapped(|ui| {
         ui.group(|ui| {
@@ -187,6 +206,17 @@ pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &A
         ui.group(|ui| {
             ui.label(egui::RichText::new("Gate").strong());
             param_knob(ui, setter, "Threshold", &params.mlc_gate);
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Clipping").strong());
+            ui.vertical(|ui| {
+                clip_type_combo(ui, setter, &params.mlc_clip_type);
+                ui.label(
+                    egui::RichText::new(params.mlc_clip_type.value().description())
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
+            });
         });
         ui.group(|ui| {
             ui.label(egui::RichText::new("LIMITER").strong());

@@ -46,6 +46,125 @@ pub enum MlcGatePos {
     Post,
 }
 
+/// Selectable clipping / saturation curve for the MLC ZERO V gain stages.
+/// The integer index (0-10) is passed to the Faust `clip_type` parameter and
+/// must stay in sync with the `clip()` selector in `dsp/mlc_zero_v.dsp`.
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug)]
+pub enum ClipType {
+    #[name = "Tanh"]
+    Tanh,
+    #[name = "Hard Clip"]
+    HardClip,
+    #[name = "Soft Sine"]
+    SoftSine,
+    #[name = "ArcTan"]
+    ArcTan,
+    #[name = "Algebraic"]
+    Algebraic,
+    #[name = "Rational"]
+    Rational,
+    #[name = "Exponential"]
+    Exponential,
+    #[name = "Cubic"]
+    Cubic,
+    #[name = "Asymmetric Tanh"]
+    AsymmetricTanh,
+    #[name = "Wave Fold"]
+    WaveFold,
+    #[name = "Asymmetric Hard"]
+    AsymmetricHard,
+}
+
+impl ClipType {
+    /// All 11 curves in DSP index order.
+    pub const ALL: [ClipType; 11] = [
+        ClipType::Tanh,
+        ClipType::HardClip,
+        ClipType::SoftSine,
+        ClipType::ArcTan,
+        ClipType::Algebraic,
+        ClipType::Rational,
+        ClipType::Exponential,
+        ClipType::Cubic,
+        ClipType::AsymmetricTanh,
+        ClipType::WaveFold,
+        ClipType::AsymmetricHard,
+    ];
+
+    /// DSP selector index (0-10) passed to the Faust `Clip Type` parameter.
+    pub fn as_f32(self) -> f32 {
+        match self {
+            ClipType::Tanh => 0.0,
+            ClipType::HardClip => 1.0,
+            ClipType::SoftSine => 2.0,
+            ClipType::ArcTan => 3.0,
+            ClipType::Algebraic => 4.0,
+            ClipType::Rational => 5.0,
+            ClipType::Exponential => 6.0,
+            ClipType::Cubic => 7.0,
+            ClipType::AsymmetricTanh => 8.0,
+            ClipType::WaveFold => 9.0,
+            ClipType::AsymmetricHard => 10.0,
+        }
+    }
+
+    /// Short display name for the curve.
+    pub fn label(self) -> &'static str {
+        match self {
+            ClipType::Tanh => "Tanh",
+            ClipType::HardClip => "Hard Clip",
+            ClipType::SoftSine => "Soft Sine",
+            ClipType::ArcTan => "ArcTan",
+            ClipType::Algebraic => "Algebraic",
+            ClipType::Rational => "Rational",
+            ClipType::Exponential => "Exponential",
+            ClipType::Cubic => "Cubic",
+            ClipType::AsymmetricTanh => "Asymmetric Tanh",
+            ClipType::WaveFold => "Wave Fold",
+            ClipType::AsymmetricHard => "Asymmetric Hard",
+        }
+    }
+
+    /// Human-readable description shown in the clip-type dropdown.
+    pub fn description(self) -> &'static str {
+        match self {
+            ClipType::Tanh => {
+                "Tanh — Compressão suave e cremosa. Referência clássica de amplificador valvulado."
+            }
+            ClipType::HardClip => {
+                "Hard Clip — Clip abrupto. Fuzz agressivo tipo transistor (Big Muff, RAT)."
+            }
+            ClipType::SoftSine => {
+                "Soft Sine — Extremamente suave. Som limpo com leve saturação 'beira da distorção'."
+            }
+            ClipType::ArcTan => {
+                "ArcTan — Saturação mais aberta que Tanh. Som limpo e articulado com menos compressão."
+            }
+            ClipType::Algebraic => {
+                "Algebraic — Cremoso nos médios, sem fizz nos agudos. Potencialmente a mais musical."
+            }
+            ClipType::Rational => {
+                "Rational — Agressivo e fuzzy. Caráter de transistor de germânio."
+            }
+            ClipType::Exponential => {
+                "Exponential — Muito agressivo. Timbre de pedal RAT/DS-1."
+            }
+            ClipType::Cubic => {
+                "Cubic — Boost limpo com saturação muito sutil. Ideal para pré-amplificador."
+            }
+            ClipType::AsymmetricTanh => {
+                "Asymmetric Tanh — Tanh com bias assimétrico. Harmônicos pares — som valvulado rico."
+            }
+            ClipType::WaveFold => {
+                "Wave Fold — Dobramento de onda. Metálico, cortante, timbre tipo 'djent'."
+            }
+            ClipType::AsymmetricHard => {
+                "Asymmetric Hard — Hard clip com thresholds diferentes. Distorção assimétrica agressiva."
+            }
+        }
+    }
+}
+
 #[derive(Params)]
 pub struct BaseIOParams {
     #[persist = "editor-state"]
@@ -115,6 +234,9 @@ pub struct BaseIOParams {
 
     #[id = "mlc_gate_pos"]
     pub mlc_gate_pos: EnumParam<MlcGatePos>,
+
+    #[id = "mlc_clip_type"]
+    pub mlc_clip_type: EnumParam<ClipType>,
 
     // --- Cabinet IR ---
     #[id = "cab_bypass"]
@@ -203,7 +325,7 @@ pub struct EditorState {
 impl Default for BaseIOParams {
     fn default() -> Self {
         Self {
-            editor_state: EguiState::from_size(800, 450),
+            editor_state: EguiState::from_size(1200, 800),
 
             input_select: EnumParam::new("Input Source", InputSelect::Stereo),
 
@@ -377,6 +499,7 @@ impl Default for BaseIOParams {
             mlc_warclaw: BoolParam::new("MLC WARCLAW", false),
             mlc_feedback: EnumParam::new("MLC Feedback", MlcFeedback::Hi),
             mlc_gate_pos: EnumParam::new("MLC Gate Pos", MlcGatePos::Pre),
+            mlc_clip_type: EnumParam::new("MLC Clip Type", ClipType::Tanh),
 
             // --- Cabinet IR defaults ---
             cabinet_bypass: BoolParam::new("Cabinet Bypass", false),

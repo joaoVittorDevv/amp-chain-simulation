@@ -108,6 +108,7 @@ struct MlcBlockParams {
     warclaw: bool,
     feedback: f32,
     gate_pos: f32,
+    clip_type: f32,
 }
 
 #[inline(always)]
@@ -125,6 +126,7 @@ fn configure_mlc(mlc: &mut MlcZeroVProcessor, params: MlcBlockParams) {
     mlc.set_warclaw(params.warclaw);
     mlc.set_feedback(params.feedback);
     mlc.set_gate_pos(params.gate_pos);
+    mlc.set_clip_type(params.clip_type);
 }
 
 pub struct BaseIO {
@@ -868,6 +870,7 @@ impl Plugin for BaseIO {
                 MlcGatePos::Pre => 0.0,
                 MlcGatePos::Post => 1.0,
             },
+            clip_type: self.params.mlc_clip_type.value().as_f32(),
         };
         let eq_active = self.params.eq_active.value();
         let eq_tanh_bypass = self.params.eq_tanh_bypass.value();

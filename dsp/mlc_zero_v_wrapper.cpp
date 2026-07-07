@@ -117,5 +117,6 @@ void mlc_zero_v_set_m45(FaustHandle handle, float value) { MLC_SET_PARAM("M45", 
 void mlc_zero_v_set_warclaw(FaustHandle handle, float value) { MLC_SET_PARAM("WARCLAW", value); }
 void mlc_zero_v_set_feedback(FaustHandle handle, float value) { MLC_SET_PARAM("Feedback", value); }
 void mlc_zero_v_set_gate_pos(FaustHandle handle, float value) { MLC_SET_PARAM("Gate Pos", value); }
+void mlc_zero_v_set_clip_type(FaustHandle handle, float value) { MLC_SET_PARAM("Clip Type", value); }
 
 }

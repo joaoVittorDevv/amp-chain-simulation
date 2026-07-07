@@ -27,6 +27,7 @@ void mlc_zero_v_set_m45(FaustHandle handle, float value);
 void mlc_zero_v_set_warclaw(FaustHandle handle, float value);
 void mlc_zero_v_set_feedback(FaustHandle handle, float value);
 void mlc_zero_v_set_gate_pos(FaustHandle handle, float value);
+void mlc_zero_v_set_clip_type(FaustHandle handle, float value);
 
 #ifdef __cplusplus
 }

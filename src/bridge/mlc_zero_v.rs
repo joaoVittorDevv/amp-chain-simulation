@@ -12,7 +12,7 @@ use crate::lab::{DspVariant, ParameterMeta};
 #[cfg(feature = "lab")]
 pub const MLC_ZERO_V_IMPL_ID: &str = "mlc-zero-v";
 #[cfg(feature = "lab")]
-pub const MLC_ZERO_V_PARAM_IDS: [&str; 13] = [
+pub const MLC_ZERO_V_PARAM_IDS: [&str; 14] = [
     "mlc_gain",
     "mlc_master",
     "mlc_bass",
@@ -26,6 +26,7 @@ pub const MLC_ZERO_V_PARAM_IDS: [&str; 13] = [
     "mlc_warclaw",
     "mlc_feedback",
     "mlc_gate_pos",
+    "mlc_clip_type",
 ];
 
 pub struct MlcZeroVProcessor {
@@ -44,6 +45,7 @@ pub struct MlcZeroVProcessor {
     warclaw: f32,
     feedback: f32,
     gate_pos: f32,
+    clip_type: f32,
 }
 
 impl MlcZeroVProcessor {
@@ -68,6 +70,7 @@ impl MlcZeroVProcessor {
                 warclaw: 0.0,
                 feedback: 1.0,
                 gate_pos: 0.0,
+                clip_type: 0.0,
             })
         }
     }
@@ -124,6 +127,10 @@ impl MlcZeroVProcessor {
     pub fn set_gate_pos(&mut self, value: f32) {
         self.gate_pos = value;
     }
+    #[inline(always)]
+    pub fn set_clip_type(&mut self, value: f32) {
+        self.clip_type = value.clamp(0.0, 10.0).round();
+    }
 }
 
 impl Drop for MlcZeroVProcessor {
@@ -165,6 +172,7 @@ impl ExternalProcessor for MlcZeroVProcessor {
             mlc_zero_v_set_warclaw(self.handle, self.warclaw);
             mlc_zero_v_set_feedback(self.handle, self.feedback);
             mlc_zero_v_set_gate_pos(self.handle, self.gate_pos);
+            mlc_zero_v_set_clip_type(self.handle, self.clip_type);
             mlc_zero_v_process(self.handle, buffer, length as _);
         }
     }
@@ -184,6 +192,7 @@ impl ExternalProcessor for MlcZeroVProcessor {
             "mlc_warclaw" => Some(self.warclaw),
             "mlc_feedback" => Some(self.feedback),
             "mlc_gate_pos" => Some(self.gate_pos),
+            "mlc_clip_type" => Some(self.clip_type),
             _ => None,
         }
     }
@@ -203,6 +212,7 @@ impl ExternalProcessor for MlcZeroVProcessor {
             "mlc_warclaw" => self.set_warclaw(value >= 0.5),
             "mlc_feedback" => self.set_feedback(enum_value(value)),
             "mlc_gate_pos" => self.set_gate_pos(enum_value(value)),
+            "mlc_clip_type" => self.set_clip_type(value),
             _ => return false,
         }
         true
@@ -312,6 +322,7 @@ fn mlc_zero_v_param_metadata() -> Vec<ParameterMeta> {
         ("mlc_warclaw", "MLC WARCLAW", (0.0, 1.0), 0.0, None),
         ("mlc_feedback", "MLC Feedback", (0.0, 1.0), 1.0, None),
         ("mlc_gate_pos", "MLC Gate Pos", (0.0, 1.0), 0.0, None),
+        ("mlc_clip_type", "MLC Clip Type", (0.0, 10.0), 0.0, None),
     ]
     .into_iter()
     .enumerate()
@@ -347,6 +358,13 @@ mod tests {
 
         assert!(processor.set_param("mlc_bright", 0.0));
         assert_eq!(processor.get_param("mlc_bright"), Some(0.0));
+
+        // Clip type is quantized to the nearest valid curve index (0-10).
+        assert!(processor.set_param("mlc_clip_type", 9.0));
+        assert_eq!(processor.get_param("mlc_clip_type"), Some(9.0));
+        assert!(processor.set_param("mlc_clip_type", 42.0));
+        assert_eq!(processor.get_param("mlc_clip_type"), Some(10.0));
+
         assert_eq!(processor.get_param("missing"), None);
     }
 }
