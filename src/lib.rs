@@ -153,6 +153,11 @@ pub struct BaseIO {
     cabinet_max_block: Arc<AtomicUsize>,
     cabinet_error: Arc<Mutex<Option<String>>>,
 
+    // --- Brickwall Limiter (final stage, after master gain) ---
+    limiter: dsp::PeakLimiter,
+    /// Live engine sample rate (Hz), kept fresh by `initialize()`.
+    sample_rate: f32,
+
     #[cfg(feature = "lab")]
     lab: Option<Arc<Lab>>,
     #[cfg(feature = "lab")]
@@ -187,6 +192,9 @@ impl Default for BaseIO {
             cabinet_sr: Arc::new(AtomicU32::new(48_000)),
             cabinet_max_block: Arc::new(AtomicUsize::new(512)),
             cabinet_error: Arc::new(Mutex::new(None)),
+
+            limiter: dsp::PeakLimiter::new(-1.0, 50.0, 48_000.0),
+            sample_rate: 48_000.0,
 
             #[cfg(feature = "lab")]
             lab: None,
@@ -703,6 +711,8 @@ impl Plugin for BaseIO {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         let sample_rate = buffer_config.sample_rate;
+        self.sample_rate = sample_rate;
+        self.limiter = dsp::PeakLimiter::new(-1.0, 50.0, sample_rate);
         for f in &mut self.faust {
             if let Some(faust) = f {
                 faust.init(sample_rate);
@@ -873,6 +883,10 @@ impl Plugin for BaseIO {
         let cab_bypass = self.params.cabinet_bypass.value();
         let cab_level = self.params.cabinet_level.smoothed.next();
         let cab_mix = self.params.cabinet_mix.smoothed.next();
+        let limiter_enable = self.params.limiter_enable.value();
+        let limiter_ceiling = self.params.limiter_ceiling.smoothed.next();
+        let limiter_release = self.params.limiter_release.smoothed.next();
+        let sample_rate = self.sample_rate;
 
         // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
         _context.set_latency_samples(0);
@@ -1077,6 +1091,19 @@ impl Plugin for BaseIO {
             if let Some(pipeline) = self.lab_pipeline.as_mut() {
                 for channel_samples in buffer_slices.iter_mut() {
                     pipeline.process_block(channel_samples.as_mut_ptr(), channel_samples.len());
+                }
+            }
+
+            // ESTÁGIO: Brickwall Limiter (após master gain, antes do saneamento NaN).
+            // Captura clipping de TODAS as fontes combinadas (EQ, amp, cabinet,
+            // master gain). Processa todos os canais no buffer plano.
+            if limiter_enable {
+                self.limiter
+                    .set_params(limiter_ceiling, limiter_release, sample_rate);
+                for channel_samples in buffer_slices.iter_mut() {
+                    for sample in channel_samples.iter_mut() {
+                        *sample = self.limiter.process(*sample);
+                    }
                 }
             }
         }

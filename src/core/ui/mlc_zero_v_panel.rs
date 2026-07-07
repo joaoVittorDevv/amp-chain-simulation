@@ -39,6 +39,51 @@ fn param_knob(ui: &mut egui::Ui, setter: &ParamSetter, label: &str, param: &Floa
     });
 }
 
+/// Knob with a custom absolute-value readout (decimals + unit), for params
+/// whose natural unit isn't a bare float (e.g. dB, ms).
+fn param_knob_unit(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    label: &str,
+    param: &FloatParam,
+    decimals: usize,
+    unit: &str,
+) {
+    use egui_knob::{Knob, KnobStyle};
+
+    ui.vertical_centered(|ui| {
+        ui.label(
+            egui::RichText::new(label)
+                .small()
+                .color(egui::Color32::GRAY),
+        );
+        let mut value = param.value();
+        let (min, max) = match param.range() {
+            nih_plug::prelude::FloatRange::Linear { min, max } => (min, max),
+            nih_plug::prelude::FloatRange::Skewed { min, max, .. } => (min, max),
+            _ => (0.0, 1.0),
+        };
+        let response = ui.add(Knob::new(&mut value, min, max, KnobStyle::Wiper).with_size(45.0));
+        if response.drag_started() {
+            setter.begin_set_parameter(param);
+        }
+        if response.changed() {
+            setter.set_parameter(param, value);
+        }
+        if response.drag_stopped() {
+            setter.end_set_parameter(param);
+        }
+
+        // Absolute runtime value the DSP used on the last audio callback.
+        let actual = param.smoothed.previous_value();
+        ui.label(
+            egui::RichText::new(format!("{:.*}{}", decimals, actual, unit))
+                .small()
+                .monospace(),
+        );
+    });
+}
+
 fn bool_switch(ui: &mut egui::Ui, setter: &ParamSetter, label: &str, param: &BoolParam) {
     let mut value = param.value();
     if ui.checkbox(&mut value, label).changed() {
@@ -142,6 +187,17 @@ pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &A
         ui.group(|ui| {
             ui.label(egui::RichText::new("Gate").strong());
             param_knob(ui, setter, "Threshold", &params.mlc_gate);
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("LIMITER").strong());
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    ui.add_space(14.0);
+                    bool_switch(ui, setter, "Enable", &params.limiter_enable);
+                });
+                param_knob_unit(ui, setter, "Ceiling", &params.limiter_ceiling, 1, " dB");
+                param_knob_unit(ui, setter, "Release", &params.limiter_release, 0, " ms");
+            });
         });
     });
 }

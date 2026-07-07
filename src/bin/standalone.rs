@@ -2,7 +2,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, ExternalProcessor};
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
-use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
+use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
 use distortion::core::state::plugin_params::{AmpModel, MlcBright, MlcFeedback, MlcGatePos};
 #[cfg(feature = "lab")]
 use distortion::core::ui::{draw_lab_panel, LabUiState};
@@ -89,6 +89,10 @@ struct StandaloneState {
     cabinet_level: f32,
     cabinet_mix: f32,
     cab_active_hash: String,
+    // --- Brickwall Limiter ---
+    limiter_enable: bool,
+    limiter_ceiling: f32,
+    limiter_release: f32,
 }
 
 impl Default for StandaloneState {
@@ -129,6 +133,9 @@ impl Default for StandaloneState {
             cabinet_level: 1.0,
             cabinet_mix: 1.0,
             cab_active_hash: String::new(),
+            limiter_enable: true,
+            limiter_ceiling: -1.0,
+            limiter_release: 50.0,
         }
     }
 }
@@ -171,6 +178,9 @@ struct AudioSnapshot {
     cabinet_bypass: bool,
     cabinet_level: f32,
     cabinet_mix: f32,
+    limiter_enable: bool,
+    limiter_ceiling: f32,
+    limiter_release: f32,
 }
 
 impl StandaloneState {
@@ -210,6 +220,9 @@ impl StandaloneState {
             cabinet_bypass: self.cabinet_bypass,
             cabinet_level: self.cabinet_level,
             cabinet_mix: self.cabinet_mix,
+            limiter_enable: self.limiter_enable,
+            limiter_ceiling: self.limiter_ceiling,
+            limiter_release: self.limiter_release,
         }
     }
 }
@@ -598,6 +611,10 @@ fn audio_worker(
                                                 mlc.init(s_rate);
                                             }
 
+                                            // Brickwall limiter (estágio final, após master gain).
+                                            let mut limiter =
+                                                PeakLimiter::new(-1.0, 50.0, s_rate);
+
                                             let mut pre_eq_l = FFTConvolver::default();
                                             let mut pre_eq_r = FFTConvolver::default();
 
@@ -909,6 +926,22 @@ fn audio_worker(
                                                                 buf_r.as_mut_ptr(),
                                                                 max_len,
                                                             );
+                                                        }
+
+                                                        // ESTÁGIO: Brickwall Limiter (após master
+                                                        // gain, antes do saneamento NaN).
+                                                        if snap.limiter_enable {
+                                                            limiter.set_params(
+                                                                snap.limiter_ceiling,
+                                                                snap.limiter_release,
+                                                                s_rate,
+                                                            );
+                                                            for l in &mut buf_l[..max_len] {
+                                                                *l = limiter.process(*l);
+                                                            }
+                                                            for r in &mut buf_r[..max_len] {
+                                                                *r = limiter.process(*r);
+                                                            }
                                                         }
                                                     }
 

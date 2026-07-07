@@ -158,6 +158,16 @@ pub struct BaseIOParams {
     pub eq_high_gain: FloatParam,
     #[id = "eq_high_q"]
     pub eq_high_q: FloatParam,
+
+    // --- Brickwall Limiter (MLC ZERO V) ---
+    #[id = "lim_en"]
+    pub limiter_enable: BoolParam,
+
+    #[id = "lim_ceil"]
+    pub limiter_ceiling: FloatParam,
+
+    #[id = "lim_rel"]
+    pub limiter_release: FloatParam,
 }
 
 pub struct EditorState {
@@ -511,6 +521,31 @@ impl Default for BaseIOParams {
             )
             .with_smoother(SmoothingStyle::Linear(50.0))
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            // --- Brickwall Limiter defaults ---
+            limiter_enable: BoolParam::new("Limiter Enable", true),
+            limiter_ceiling: FloatParam::new(
+                "Limiter Ceiling",
+                -1.0,
+                FloatRange::Linear {
+                    min: -12.0,
+                    max: 0.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            limiter_release: FloatParam::new(
+                "Limiter Release",
+                50.0,
+                FloatRange::Linear {
+                    min: 10.0,
+                    max: 500.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" ms")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
         }
     }
 }
