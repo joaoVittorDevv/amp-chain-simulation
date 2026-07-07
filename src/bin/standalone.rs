@@ -1691,6 +1691,9 @@ impl eframe::App for StandaloneApp {
         let mut ui_mlc_presence = snap_ui.mlc_presence;
         let mut ui_mlc_depth = snap_ui.mlc_depth;
         let mut ui_mlc_gate = snap_ui.mlc_gate;
+        let mut ui_limiter_enable = snap_ui.limiter_enable;
+        let mut ui_limiter_ceiling = snap_ui.limiter_ceiling;
+        let mut ui_limiter_release = snap_ui.limiter_release;
 
         let mut ui_eq_low_freq = snap_ui.eq_low_freq;
         let mut ui_eq_low_gain = snap_ui.eq_low_gain;
@@ -2286,6 +2289,69 @@ impl eframe::App for StandaloneApp {
                             );
                         });
                     });
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new("LIMITER").strong());
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.add_space(14.0);
+                                if ui.checkbox(&mut ui_limiter_enable, "Enable").changed() {
+                                    changed = true;
+                                }
+                            });
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Ceiling")
+                                        .small()
+                                        .color(egui::Color32::GRAY),
+                                );
+                                if ui
+                                    .add(
+                                        Knob::new(
+                                            &mut ui_limiter_ceiling,
+                                            -12.0,
+                                            0.0,
+                                            KnobStyle::Wiper,
+                                        )
+                                        .with_size(45.0),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.1} dB", ui_limiter_ceiling))
+                                        .small()
+                                        .monospace(),
+                                );
+                            });
+                            ui.vertical_centered(|ui| {
+                                ui.label(
+                                    egui::RichText::new("Release")
+                                        .small()
+                                        .color(egui::Color32::GRAY),
+                                );
+                                if ui
+                                    .add(
+                                        Knob::new(
+                                            &mut ui_limiter_release,
+                                            10.0,
+                                            500.0,
+                                            KnobStyle::Wiper,
+                                        )
+                                        .with_size(45.0),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0} ms", ui_limiter_release))
+                                        .small()
+                                        .monospace(),
+                                );
+                            });
+                        });
+                    });
                 });
                 if changed {
                     if let Ok(mut st) = self.standalone_state.lock() {
@@ -2297,6 +2363,9 @@ impl eframe::App for StandaloneApp {
                         st.mlc_presence = ui_mlc_presence;
                         st.mlc_depth = ui_mlc_depth;
                         st.mlc_gate = ui_mlc_gate;
+                        st.limiter_enable = ui_limiter_enable;
+                        st.limiter_ceiling = ui_limiter_ceiling;
+                        st.limiter_release = ui_limiter_release;
                     }
                 }
             },
