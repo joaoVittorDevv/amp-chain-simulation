@@ -78,7 +78,7 @@ make check-env   # Validate Faust, Mojo, and directory permissions
 ```
 
 - Standalone binary: `cargo run --release --bin standalone`
-- No test suite exists currently (no `#[test]` functions found)
+- Test suite: `cargo test` runs unit tests plus `tests/lab_integration.rs`
 - Debug build: `cargo build` (slow due to nih-plug git dep)
 
 ## Architecture Overview
@@ -105,6 +105,8 @@ Audio plugin (VST3/CLAP + standalone) for guitar distortion. Three-language stac
 | `src/core/state/plugin_params.rs` | nih_plug `#[derive(Params)]` struct + `EditorState` |
 | `src/core/dsp/analyzer.rs` | FFT spectrum analyzer (2048-point, Blackman-Harris window) |
 | `src/core/ui/` | egui panels: spectrum graph, signal chain, EQ/Neural controls |
+| `src/lab/` | Component Lab database, snapshots, variant registry, pipeline slots, export/verification |
+| `tests/lab_integration.rs` | Component Lab persistence and pipeline integration coverage |
 | `dsp/main.dsp` | Faust DSP source (truth for linear processing) |
 | `dsp/wrapper.cpp` / `wrapper.h` | C ABI wrapper exposing Faust as `FaustHandle` API |
 | `neural/main.mojo` | Mojo neural saturation (tanh polynomial approximation) |
@@ -135,6 +137,14 @@ var data = UnsafePointer[Float32, MutAnyOrigin](unsafe_from_address=address)
 - **Plugin mode** (`src/lib.rs`): nih_plug `Plugin` trait, DAW hosts, nih_plug_egui UI
 - **Standalone mode** (`src/bin/standalone.rs`): CPAL audio I/O, eframe/egui UI, audio routing config
 - Both share `core/` modules (dsp, ui) but have independent DSP pipeline implementations
+
+**Component Lab (`feature = "lab"`):**
+- Enabled by default through Cargo features and gated at plugin/standalone integration points with `#[cfg(feature = "lab")]`.
+- `Lab::init(data_dir)` opens `lab.db`, seeds default categories, registers DSP variant factories, and loads the default pipeline config.
+- `VariantRegistry` maps implementation ids to infallible factories: `faust-eq`, `mojo-neural`, and `mlc-zero-v`.
+- Existing bridge processors implement `DspVariant` additively; their `ExternalProcessor` behavior remains the runtime source of truth.
+- `PipelineManager` owns node slots and is processed from the audio thread without locks or allocation. UI-side mailbox garbage collection uses cloned `VariantMailbox` handles.
+- The lab panel is a simple egui window available in plugin and standalone via the `Lab` header button.
 
 ### Parameter Smoothing
 

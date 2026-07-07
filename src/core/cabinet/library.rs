@@ -186,10 +186,7 @@ impl CabinetLibrary {
 
         if self.get_selected_hash()?.as_deref() == Some(hash) {
             self.conn
-                .execute(
-                    "DELETE FROM cabinet_state WHERE key = 'selected_hash'",
-                    [],
-                )
+                .execute("DELETE FROM cabinet_state WHERE key = 'selected_hash'", [])
                 .map_err(|e| CabinetError::Database(e.to_string()))?;
         }
         Ok(())
@@ -364,7 +361,9 @@ mod tests {
         assert_eq!(bytes, DEFAULT_IR);
 
         // Re-importing the same bytes dedups (still one row, same hash).
-        let m2 = lib.import_ir(DEFAULT_IR, "other-name.wav").expect("re-import");
+        let m2 = lib
+            .import_ir(DEFAULT_IR, "other-name.wav")
+            .expect("re-import");
         assert_eq!(m1.content_hash, m2.content_hash);
         assert_eq!(lib.list_irs().unwrap().len(), 1);
 

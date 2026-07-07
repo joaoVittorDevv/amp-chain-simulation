@@ -7,6 +7,23 @@
 include!(concat!(env!("OUT_DIR"), "/bindings_faust.rs"));
 
 use super::ExternalProcessor;
+#[cfg(feature = "lab")]
+use crate::lab::DspVariant;
+
+#[cfg(feature = "lab")]
+pub const FAUST_EQ_IMPL_ID: &str = "faust-eq";
+#[cfg(feature = "lab")]
+pub const FAUST_EQ_PARAM_IDS: [&str; 9] = [
+    "eq_low_freq",
+    "eq_low_gain",
+    "eq_low_q",
+    "eq_mid_freq",
+    "eq_mid_gain",
+    "eq_mid_q",
+    "eq_high_freq",
+    "eq_high_gain",
+    "eq_high_q",
+];
 
 pub struct FaustProcessor {
     handle: FaustHandle,
@@ -82,5 +99,55 @@ impl ExternalProcessor for FaustProcessor {
         unsafe {
             faust_process(self.handle, buffer, length as _);
         }
+    }
+}
+
+#[cfg(feature = "lab")]
+impl DspVariant for FaustProcessor {
+    fn process_block(&mut self, buffer: *mut f32, length: usize) {
+        ExternalProcessor::process_block(self, buffer, length);
+    }
+
+    fn param_count(&self) -> usize {
+        FAUST_EQ_PARAM_IDS.len()
+    }
+
+    fn param_ids(&self) -> &[&str] {
+        &FAUST_EQ_PARAM_IDS
+    }
+
+    fn latency(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(feature = "lab")]
+struct FaustBypassVariant;
+
+#[cfg(feature = "lab")]
+impl DspVariant for FaustBypassVariant {
+    fn process_block(&mut self, _buffer: *mut f32, _length: usize) {}
+
+    fn param_count(&self) -> usize {
+        FAUST_EQ_PARAM_IDS.len()
+    }
+
+    fn param_ids(&self) -> &[&str] {
+        &FAUST_EQ_PARAM_IDS
+    }
+
+    fn latency(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(feature = "lab")]
+pub fn faust_eq_factory(sample_rate: f32) -> Box<dyn DspVariant> {
+    match FaustProcessor::new() {
+        Some(mut processor) => {
+            processor.init(sample_rate);
+            Box::new(processor)
+        }
+        None => Box::new(FaustBypassVariant),
     }
 }

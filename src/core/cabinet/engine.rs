@@ -239,7 +239,11 @@ impl CabinetEngine {
     ) {
         self.poll_commands();
 
-        let len = left.len().min(right.len()).min(scratch_l.len()).min(scratch_r.len());
+        let len = left
+            .len()
+            .min(right.len())
+            .min(scratch_l.len())
+            .min(scratch_r.len());
         if len == 0 {
             return;
         }
@@ -259,17 +263,28 @@ impl CabinetEngine {
 
         match self.current.as_mut().and_then(Arc::get_mut) {
             Some(rt) => {
-                if rt.convolver_l.process(&scratch_l[..len], &mut left[..len]).is_err() {
+                if rt
+                    .convolver_l
+                    .process(&scratch_l[..len], &mut left[..len])
+                    .is_err()
+                {
                     left[..len].copy_from_slice(&scratch_l[..len]);
                 }
-                if rt.convolver_r.process(&scratch_r[..len], &mut right[..len]).is_err() {
+                if rt
+                    .convolver_r
+                    .process(&scratch_r[..len], &mut right[..len])
+                    .is_err()
+                {
                     right[..len].copy_from_slice(&scratch_r[..len]);
                 }
             }
             None => {
                 // The live runtime should be uniquely owned on the audio thread;
                 // a shared Arc here is a bug. Fail loudly in debug, pass dry in release.
-                debug_assert!(false, "cabinet runtime Arc unexpectedly shared; get_mut failed");
+                debug_assert!(
+                    false,
+                    "cabinet runtime Arc unexpectedly shared; get_mut failed"
+                );
                 return;
             }
         }
@@ -410,14 +425,20 @@ mod tests {
                 break;
             }
         }
-        assert!(eng.current_hash().is_none(), "clear removed the active runtime");
+        assert!(
+            eng.current_hash().is_none(),
+            "clear removed the active runtime"
+        );
 
         // After clear the stage is pass-through.
         let mut l = vec![0.3f32; 64];
         let mut r = vec![0.3f32; 64];
         let (mut sl, mut sr) = scratch(64);
         eng.process(&mut l, &mut r, &mut sl, &mut sr, false, 1.0, 1.0);
-        assert!(l.iter().all(|&x| (x - 0.3).abs() < 1e-6), "pass-through after clear");
+        assert!(
+            l.iter().all(|&x| (x - 0.3).abs() < 1e-6),
+            "pass-through after clear"
+        );
     }
 
     #[test]

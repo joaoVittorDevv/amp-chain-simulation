@@ -7,6 +7,8 @@ use std::sync::{Arc, Mutex};
 
 pub mod bridge;
 pub mod core;
+#[cfg(feature = "lab")]
+pub mod lab;
 
 use crate::bridge::{
     faust::FaustProcessor, mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, ExternalProcessor,
@@ -73,9 +75,23 @@ pub const VST3_ID: [u8; 16] = [
 use crate::core::state::plugin_params::{
     AmpModel, BaseIOParams, EditorState, InputSelect, MlcBright, MlcFeedback, MlcGatePos,
 };
+#[cfg(feature = "lab")]
+use crate::lab::{Lab, PipelineManager};
 
 const MAX_BLOCK: usize = 8192;
 const CROSSFADE_LEN: usize = 480;
+
+#[cfg(feature = "lab")]
+fn lab_data_dir() -> Result<std::path::PathBuf, lab::LabError> {
+    Ok(dirs::config_dir()
+        .ok_or(lab::LabError::ConfigDirUnavailable)?
+        .join("distortion"))
+}
+
+#[cfg(feature = "lab")]
+fn default_lab_categories_for_audio() -> Vec<lab::Category> {
+    lab::default_categories()
+}
 
 #[derive(Clone, Copy)]
 struct MlcBlockParams {
@@ -136,6 +152,15 @@ pub struct BaseIO {
     cabinet_sr: Arc<AtomicU32>,
     cabinet_max_block: Arc<AtomicUsize>,
     cabinet_error: Arc<Mutex<Option<String>>>,
+
+    #[cfg(feature = "lab")]
+    lab: Option<Arc<Lab>>,
+    #[cfg(feature = "lab")]
+    lab_pipeline: Option<PipelineManager>,
+    #[cfg(feature = "lab")]
+    lab_mailboxes: Vec<Arc<lab::VariantMailbox>>,
+    #[cfg(feature = "lab")]
+    lab_error: Arc<Mutex<Option<String>>>,
 }
 
 impl Default for BaseIO {
@@ -162,6 +187,15 @@ impl Default for BaseIO {
             cabinet_sr: Arc::new(AtomicU32::new(48_000)),
             cabinet_max_block: Arc::new(AtomicUsize::new(512)),
             cabinet_error: Arc::new(Mutex::new(None)),
+
+            #[cfg(feature = "lab")]
+            lab: None,
+            #[cfg(feature = "lab")]
+            lab_pipeline: None,
+            #[cfg(feature = "lab")]
+            lab_mailboxes: Vec::new(),
+            #[cfg(feature = "lab")]
+            lab_error: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -207,6 +241,14 @@ impl Plugin for BaseIO {
                 cabinet_sr: self.cabinet_sr.clone(),
                 cabinet_max_block: self.cabinet_max_block.clone(),
                 cabinet_error: self.cabinet_error.clone(),
+                #[cfg(feature = "lab")]
+                lab: self.lab.clone(),
+                #[cfg(feature = "lab")]
+                lab_error: self.lab_error.clone(),
+                #[cfg(feature = "lab")]
+                lab_ui: crate::core::ui::LabUiState::default(),
+                #[cfg(feature = "lab")]
+                lab_mailboxes: self.lab_mailboxes.clone(),
             },
             |_, _| {},
             move |egui_ctx, setter, state| {
@@ -292,6 +334,13 @@ impl Plugin for BaseIO {
                             setter.set_parameter(&state.params.bypass, new_bypass);
                             setter.end_set_parameter(&state.params.bypass);
                         }
+                        #[cfg(feature = "lab")]
+                        {
+                            ui.separator();
+                            if ui.button("Lab").clicked() {
+                                state.lab_ui.is_open = !state.lab_ui.is_open;
+                            }
+                        }
                     });
                 });
 
@@ -327,6 +376,10 @@ impl Plugin for BaseIO {
 
                 // Drop any parked (old) cabinet runtime on this UI thread.
                 state.cabinet_mailbox.collect_garbage();
+                #[cfg(feature = "lab")]
+                for mailbox in &state.lab_mailboxes {
+                    mailbox.collect_garbage();
+                }
 
                 let cab_bypass_now = state.params.cabinet_bypass.value();
                 let cab_active = !cab_bypass_now;
@@ -619,6 +672,17 @@ impl Plugin for BaseIO {
                         );
                     },
                 );
+
+                #[cfg(feature = "lab")]
+                {
+                    let lab_error = state.lab_error.lock().ok().and_then(|error| error.clone());
+                    ui::draw_lab_panel(
+                        egui_ctx,
+                        state.lab.as_deref(),
+                        &mut state.lab_ui,
+                        lab_error.as_deref(),
+                    );
+                }
             },
         )
     }
@@ -671,6 +735,44 @@ impl Plugin for BaseIO {
         self.cabinet_engine.set_sample_rate(sample_rate);
         self.cabinet_sr.store(sample_rate as u32, Ordering::Relaxed);
         self.cabinet_max_block.store(max_block, Ordering::Relaxed);
+
+        #[cfg(feature = "lab")]
+        match lab_data_dir().and_then(Lab::init) {
+            Ok(lab) => {
+                let categories = lab
+                    .db()
+                    .lock()
+                    .ok()
+                    .and_then(|db| db.list_categories().ok())
+                    .unwrap_or_else(default_lab_categories_for_audio);
+                match PipelineManager::from_categories(&categories) {
+                    Ok(manager) => {
+                        self.lab_mailboxes = manager.mailboxes();
+                        self.lab_pipeline = Some(manager);
+                        self.lab = Some(Arc::new(lab));
+                        if let Ok(mut error) = self.lab_error.lock() {
+                            *error = None;
+                        }
+                    }
+                    Err(err) => {
+                        self.lab_mailboxes.clear();
+                        self.lab_pipeline = None;
+                        self.lab = Some(Arc::new(lab));
+                        if let Ok(mut error) = self.lab_error.lock() {
+                            *error = Some(err.to_string());
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                self.lab = None;
+                self.lab_pipeline = None;
+                self.lab_mailboxes.clear();
+                if let Ok(mut error) = self.lab_error.lock() {
+                    *error = Some(err.to_string());
+                }
+            }
+        }
 
         // Resolve the active IR: prefer the persisted per-project hash, otherwise
         // fall back to the library's stored selection (the seeded default IR).
@@ -959,6 +1061,13 @@ impl Plugin for BaseIO {
                     for sample in channel_samples.iter_mut() {
                         *sample *= neural_vol;
                     }
+                }
+            }
+
+            #[cfg(feature = "lab")]
+            if let Some(pipeline) = self.lab_pipeline.as_mut() {
+                for channel_samples in buffer_slices.iter_mut() {
+                    pipeline.process_block(channel_samples.as_mut_ptr(), channel_samples.len());
                 }
             }
         }

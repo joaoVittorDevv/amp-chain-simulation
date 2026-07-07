@@ -1,7 +1,7 @@
 # Project: Distortion Plugin
 
 **Created:** 2026-07-06
-**Last updated:** 2026-07-06
+**Last updated:** 2026-07-07
 
 ## Vision
 
@@ -17,6 +17,7 @@ A professional-grade guitar distortion audio plugin (VST3/CLAP + standalone) tha
 - [ ] Standalone mode with flexible audio routing (CPAL)
 - [ ] Low-latency, zero-allocation audio thread
 - [ ] Cross-platform: Linux primary, macOS/Windows compatible
+- [ ] Component Lab: versioned snapshots, variant management, and AI-readable export of DSP components
 
 ## Target Audience
 

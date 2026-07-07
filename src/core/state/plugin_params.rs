@@ -175,6 +175,19 @@ pub struct EditorState {
     pub cabinet_max_block: Arc<std::sync::atomic::AtomicUsize>,
     /// Last import/decode error, shown in the panel until the next successful op.
     pub cabinet_error: Arc<Mutex<Option<String>>>,
+
+    /// Shared Component Lab facade for UI/database operations.
+    #[cfg(feature = "lab")]
+    pub lab: Option<Arc<crate::lab::Lab>>,
+    /// Last Component Lab initialization or UI error.
+    #[cfg(feature = "lab")]
+    pub lab_error: Arc<Mutex<Option<String>>>,
+    /// Retained Component Lab panel state.
+    #[cfg(feature = "lab")]
+    pub lab_ui: crate::core::ui::LabUiState,
+    /// Lab pipeline mailboxes collected on the UI thread.
+    #[cfg(feature = "lab")]
+    pub lab_mailboxes: Vec<Arc<crate::lab::VariantMailbox>>,
 }
 
 impl Default for BaseIOParams {

@@ -53,7 +53,11 @@ pub fn draw_cabinet_panel(
     // --- Knobs row: LEVEL, MIX ---
     ui.horizontal(|ui| {
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new("LEVEL").small().color(egui::Color32::GRAY));
+            ui.label(
+                egui::RichText::new("LEVEL")
+                    .small()
+                    .color(egui::Color32::GRAY),
+            );
             // level is stored as a linear gain; show it in dB.
             let mut level = get_level();
             if ui
@@ -69,7 +73,11 @@ pub fn draw_cabinet_panel(
         ui.add_space(16.0);
 
         ui.vertical(|ui| {
-            ui.label(egui::RichText::new("MIX").small().color(egui::Color32::GRAY));
+            ui.label(
+                egui::RichText::new("MIX")
+                    .small()
+                    .color(egui::Color32::GRAY),
+            );
             let mut mix = get_mix();
             if ui
                 .add(Knob::new(&mut mix, 0.0, 1.0, KnobStyle::Wiper).with_size(45.0))
@@ -110,7 +118,9 @@ pub fn draw_cabinet_panel(
     // --- Error area ---
     if let Some(err) = error {
         ui.add_space(4.0);
-        ui.label(egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(220, 90, 90)));
+        ui.label(
+            egui::RichText::new(format!("⚠ {}", err)).color(egui::Color32::from_rgb(220, 90, 90)),
+        );
     }
 
     ui.add_space(6.0);
@@ -118,13 +128,19 @@ pub fn draw_cabinet_panel(
     // --- IR library browser ---
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("IR Library").strong());
-        ui.label(egui::RichText::new(format!("[{}]", ir_list.len())).small().color(egui::Color32::GRAY));
+        ui.label(
+            egui::RichText::new(format!("[{}]", ir_list.len()))
+                .small()
+                .color(egui::Color32::GRAY),
+        );
     });
 
     if ir_list.is_empty() {
         ui.add_space(8.0);
         ui.vertical_centered(|ui| {
-            ui.label(egui::RichText::new("Nenhum IR de caixa carregado").color(egui::Color32::GRAY));
+            ui.label(
+                egui::RichText::new("Nenhum IR de caixa carregado").color(egui::Color32::GRAY),
+            );
             if ui.button("📂 Load IR…").clicked() {
                 import_ir();
             }
@@ -138,13 +154,7 @@ pub fn draw_cabinet_panel(
                     let is_active = m.content_hash == active_hash;
                     let bullet = if is_active { "● " } else { "   " };
                     let ch = if m.channels == 1 { "mono" } else { "stereo" };
-                    let label = format!(
-                        "{}{}   {}k {}",
-                        bullet,
-                        m.name,
-                        m.sample_rate / 1000,
-                        ch
-                    );
+                    let label = format!("{}{}   {}k {}", bullet, m.name, m.sample_rate / 1000, ch);
                     if ui.selectable_label(is_active, label).clicked() && !is_active {
                         select_ir(m.content_hash.clone());
                     }

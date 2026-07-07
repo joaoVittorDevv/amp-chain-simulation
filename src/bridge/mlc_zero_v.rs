@@ -6,6 +6,27 @@
 include!(concat!(env!("OUT_DIR"), "/bindings_mlc_zero_v.rs"));
 
 use super::ExternalProcessor;
+#[cfg(feature = "lab")]
+use crate::lab::DspVariant;
+
+#[cfg(feature = "lab")]
+pub const MLC_ZERO_V_IMPL_ID: &str = "mlc-zero-v";
+#[cfg(feature = "lab")]
+pub const MLC_ZERO_V_PARAM_IDS: [&str; 13] = [
+    "mlc_gain",
+    "mlc_master",
+    "mlc_bass",
+    "mlc_middle",
+    "mlc_treble",
+    "mlc_presence",
+    "mlc_depth",
+    "mlc_gate",
+    "mlc_bright",
+    "mlc_m45",
+    "mlc_warclaw",
+    "mlc_feedback",
+    "mlc_gate_pos",
+];
 
 pub struct MlcZeroVProcessor {
     handle: FaustHandle,
@@ -146,5 +167,55 @@ impl ExternalProcessor for MlcZeroVProcessor {
             mlc_zero_v_set_gate_pos(self.handle, self.gate_pos);
             mlc_zero_v_process(self.handle, buffer, length as _);
         }
+    }
+}
+
+#[cfg(feature = "lab")]
+impl DspVariant for MlcZeroVProcessor {
+    fn process_block(&mut self, buffer: *mut f32, length: usize) {
+        ExternalProcessor::process_block(self, buffer, length);
+    }
+
+    fn param_count(&self) -> usize {
+        MLC_ZERO_V_PARAM_IDS.len()
+    }
+
+    fn param_ids(&self) -> &[&str] {
+        &MLC_ZERO_V_PARAM_IDS
+    }
+
+    fn latency(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(feature = "lab")]
+struct MlcZeroVBypassVariant;
+
+#[cfg(feature = "lab")]
+impl DspVariant for MlcZeroVBypassVariant {
+    fn process_block(&mut self, _buffer: *mut f32, _length: usize) {}
+
+    fn param_count(&self) -> usize {
+        MLC_ZERO_V_PARAM_IDS.len()
+    }
+
+    fn param_ids(&self) -> &[&str] {
+        &MLC_ZERO_V_PARAM_IDS
+    }
+
+    fn latency(&self) -> usize {
+        0
+    }
+}
+
+#[cfg(feature = "lab")]
+pub fn mlc_zero_v_factory(sample_rate: f32) -> Box<dyn DspVariant> {
+    match MlcZeroVProcessor::new() {
+        Some(mut processor) => {
+            processor.init(sample_rate);
+            Box::new(processor)
+        }
+        None => Box::new(MlcZeroVBypassVariant),
     }
 }

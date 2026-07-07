@@ -98,6 +98,51 @@ None currently.
 **Finding:** Pi's DeepSeek provider was intermittently unavailable (HTTP 404) during planning, causing task failures. Later recovered and successfully completed cross-vendor review.
 **Impact:** Cross-review executed with pi after provider recovered. Future: have fallback review path (claude_code when available).
 
+### D-011: Category Hierarchy for Component Lab
+**Date:** 2026-07-07
+**Decision:** Each DSP node belongs to exactly one category (e.g., `amp-modeler`, `eq`, `cab-sim`). The pipeline enforces at most one active node per category. Categories are ordered deterministically in the signal chain.
+**Rationale:** Prevents ambiguous pipeline states (e.g., two amps in series not intended). Matches the user's mental model of "one slot per effect type." Categories are extensible — new categories added by registering them in the Lab.
+
+### D-012: Snapshot Format — AI-Readable JSON
+**Date:** 2026-07-07
+**Decision:** Snapshots use a verbose, self-describing JSON format with engineering prose fields (`engineering_notes`, `signal_flow_description`, per-parameter `description`). The format is designed to be consumable by an LLM for code generation in another project.
+**Rationale:** The primary export use case is replicating a component in a different plugin project via LLM. The format must contain enough semantic context for an LLM to generate correct Rust/nih_plug integration code without ambiguity.
+
+### D-013: Variant Switching via ArcSwap + Background Thread
+**Date:** 2026-07-07
+**Decision:** Variant switching uses `ArcSwap<Option<Arc<Variant>>>` for lock-free audio thread access and `std::thread::spawn` for background DSP loading/compilation. Audio thread outputs silence during loading.
+**Rationale:** Faust compilation can take 1-2 seconds and must never block the audio thread. `ArcSwap` is proven in the existing `CabinetEngine`. Silence during loading is acceptable for the laboratory use case (not a live performance tool).
+
+### D-014: Export as Source Bundle, Not Binary
+**Date:** 2026-07-07
+**Decision:** Component export produces a `.tar.gz` of source files + metadata + templates, not a pre-compiled VST3/CLAP binary.
+**Rationale:** The destination project may have a different build configuration, target platform, or nih_plug version. Source bundles give maximum flexibility. The LLM integration guide provides step-by-step compilation instructions.
+
+### D-015: SQLite as Single Database for All Lab State
+**Date:** 2026-07-07
+**Decision:** All lab state (categories, nodes, variants, snapshots, pipelines, verification checks) lives in a single SQLite database at `~/.config/distortion/lab.db`. Snapshots are also committable as JSON files in `snapshots/` for git sharing.
+**Rationale:** Single-file simplicity, already have `rusqlite` in the stack. JSON exports provide the git-shareable artifact. WAL journal mode allows concurrent reads from UI while writes happen on background threads.
+
+### D-016: Pre-Compiled DSP Model — No Runtime Compilation
+**Date:** 2026-07-07
+**Decision:** All DSP implementations (Faust, Mojo) are pre-compiled into the binary at build time via `build.rs`. A `VariantRegistry` maps variant IDs to factory functions. Snapshots store a `variant_impl_id` that selects which compiled-in DSP to use. Switching variants is selection + initialization, never compilation.
+**Rationale:** Cross-review revealed runtime Faust/Mojo compilation is architecturally infeasible — `build.rs` runs at compile time, shipped VST3/CLAP has no Faust binary/C++ compiler/bindgen. Pre-compiled model matches the existing `build.rs → cc::Build → link` pipeline.
+
+### D-017: SHA256 Exclusively for Content Hashing
+**Date:** 2026-07-07
+**Decision:** All snapshot and MANIFEST content hashing uses SHA256 via the `sha2` crate. The existing `blake3` usage in CabinetLibrary is NOT reused for the lab module.
+**Rationale:** SHA256 is the standard for manifest integrity verification and interop. Using two different hash algorithms in the same feature creates confusion about which hash is authoritative. This is a new dependency (`sha2`) but adds only ~2 MB to the build.
+
+### D-018: Mailbox+Trash Audio Thread Pattern (Mirrors CabinetEngine)
+**Date:** 2026-07-07
+**Decision:** Variant switching uses the exact same mailbox+trash hand-off pattern as `CabinetEngine`: audio thread owns the live `Arc<VariantRuntime>` uniquely, background thread posts new runtimes to a mailbox, audio thread swaps at safe points, old runtimes go to a trash slot for UI-thread deferred drop.
+**Rationale:** Cross-review revealed the original `ArcSwap::load_full()` + drop-per-block design would deallocate DSP objects on the audio thread (violating CLAUDE.md no-alloc rule) and couldn't provide `&mut self` for `process_block()`. The proven CabinetEngine pattern solves both problems.
+
+### D-019: Snapshots Store Parameter Values, Not Definitions
+**Date:** 2026-07-07
+**Decision:** Snapshots store `Vec<ParamValue>` (id + f32 value pairs), not NIH parameter definitions (ranges, smoothing, labels). The plugin's `BaseIOParams` layout is fixed at compile time. Loading a snapshot applies saved values into matching param IDs; extra IDs are ignored; missing params keep current values.
+**Rationale:** `BaseIOParams` is a static `#[derive(Params)]` struct. DAW hosts expect a stable parameter list. Replacing ranges/defaults/smoothing at runtime is incompatible with NIH plugin parameter registration and host automation.
+
 ## Deferred Ideas
 
 - MIDI control mapping for MLC amp parameters (matching real amp's MIDI capability)

@@ -125,7 +125,25 @@ make clean
 # Remove: target/, dsp/*.hpp, dsp/*.cpp gerados, neural/*.so
 ```
 
-### 2.5 Diagrama do Fluxo de Build
+### 2.5 Component Lab Workflow
+
+O Component Lab fica em `src/lab/` e é ativado pela feature `lab` (default). Ele cria o banco em `~/.config/distortion/lab.db`, registra categorias do pipeline e expõe variantes DSP existentes como componentes selecionáveis.
+
+Fluxo básico:
+
+```bash
+cargo check
+cargo test
+cargo run --release --bin standalone
+```
+
+- Abra o painel pelo botão `Lab` no plugin ou no standalone.
+- O painel mostra o caminho do banco, categorias carregadas, factories registradas e botões de snapshot/export.
+- As factories atuais são `faust-eq`, `mojo-neural` e `mlc-zero-v`.
+- O pipeline de áudio existente continua como fallback. Quando um node do Lab tiver variante ativa, `PipelineManager::process_block()` pode processar o buffer sem `Mutex` e sem alocação no callback.
+- Testes de integração ficam em `tests/lab_integration.rs` e cobrem snapshot round-trip, troca de variante, bypass e exclusividade de amps.
+
+### 2.6 Diagrama do Fluxo de Build
 
 ```
 make run / make bundle

@@ -7,11 +7,11 @@
 //!   receiving fully-built runtimes via a lock-free [`engine::CabinetMailbox`].
 //! - [`runtime::CabinetRuntime`] — a built convolver pair ready for the audio thread.
 
-pub mod types;
+pub mod engine;
 pub mod library;
 pub mod runtime;
-pub mod engine;
+pub mod types;
 
-pub use types::*; // IrMeta, CabinetRuntime, CabinetError
-pub use library::CabinetLibrary;
 pub use engine::{CabinetEngine, CabinetMailbox};
+pub use library::CabinetLibrary;
+pub use types::*; // IrMeta, CabinetRuntime, CabinetError

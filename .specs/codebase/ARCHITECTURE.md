@@ -1,6 +1,7 @@
 # Architecture
 
 **Analyzed:** 2026-07-06
+**Updated:** 2026-07-07 (added Component Lab module documentation)
 
 **Pattern:** Dual-target modular (Plugin + Standalone sharing core DSP bridges and UI)
 
@@ -148,3 +149,56 @@ dsp/main.dsp ──faust──▶ dsp/FaustModule.hpp
 3. **`ActivePanel` enum** — UI-only panel selector [src/core/ui/signal_chain.rs:3]
 
 The `EnumParam` pattern is the primary candidate for an amp model selector.
+
+## Component Lab Module (src/lab/) — v0.3 In Progress
+
+The `src/lab/` module provides persistence, snapshot metadata, export, verification, and runtime DSP variant slots for component experiments. It wraps existing DSP processors additively; the hardcoded audio chain remains the fallback path.
+
+### Hierarchy
+
+```
+Category (ex: "amp-modeler")   ← 1 slot in pipeline
+  └── Node (ex: "Amp Modeler")  ← 1 node per category
+        └── Variant A: "MLC ZERO V"   ← multiple implementations
+        │     └── Snapshot v1.0.0     ← versioned state
+        └── Variant B: "JCM900"
+              └── Snapshot v1.0.0
+```
+
+### Key Patterns
+
+- **Variant Switching:** `VariantMailbox` uses `ArcSwapOption` inbox/trash and an audio-owned `VariantSlot`.
+- **Audio Thread:** `PipelineManager::process_block()` iterates pre-owned node slots; no DB access, no `Mutex`, no allocation.
+- **Garbage Collection:** old variants are parked in mailbox trash and collected from the UI thread.
+- **Storage:** SQLite at `~/.config/distortion/lab.db` (bundled rusqlite)
+- **Registry:** `VariantRegistry` maps implementation ids to factories for `faust-eq`, `mojo-neural`, and `mlc-zero-v`.
+- **Export:** AI-readable JSON + source bundle as `.tar.gz`
+
+### DspVariant Trait
+
+Existing processors implement `DspVariant` without changing their `ExternalProcessor` behavior:
+
+```rust
+pub trait DspVariant: Send {
+    fn process_block(&mut self, buffer: *mut f32, length: usize);
+    fn param_count(&self) -> usize;
+    fn param_ids(&self) -> &[&str];
+    fn latency(&self) -> usize;
+}
+```
+
+### Module Structure
+
+```
+src/lab/
+├── mod.rs              # Lab facade (init, save, load, export)
+├── node.rs             # Node + variant switching lifecycle
+├── variant_runtime.rs  # VariantMailbox + VariantSlot
+├── snapshot.rs         # Snapshot data model + serde
+├── component.rs        # DspVariant trait + data model types
+├── database.rs         # SQLite CRUD + migrations
+├── pipeline.rs         # Pipeline slot management
+├── export.rs           # .tar.gz bundle generation
+├── verification.rs     # Automated + manual checks
+└── registry.rs         # VariantFactory + VariantRegistry
+```

@@ -4,7 +4,11 @@ use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, Ext
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{AnalyzerDsp, FFT_SIZE};
 use distortion::core::state::plugin_params::{AmpModel, MlcBright, MlcFeedback, MlcGatePos};
+#[cfg(feature = "lab")]
+use distortion::core::ui::{draw_lab_panel, LabUiState};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
+#[cfg(feature = "lab")]
+use distortion::lab::{default_categories, Lab, PipelineManager};
 use eframe::egui;
 use fft_convolver::FFTConvolver;
 use rtrb::{Consumer, RingBuffer};
@@ -21,6 +25,13 @@ const DEFAULT_CABINET_IR: &[u8] = include_bytes!("../../neural/drive/cabinet_ir.
 const DEFAULT_PRE_EQ_IR: &[u8] = include_bytes!("../../neural/drive/pre_eq_ir.wav");
 
 const CROSSFADE_LEN: usize = 480;
+
+#[cfg(feature = "lab")]
+fn lab_data_dir() -> Result<std::path::PathBuf, distortion::lab::LabError> {
+    Ok(dirs::config_dir()
+        .ok_or(distortion::lab::LabError::ConfigDirUnavailable)?
+        .join("distortion"))
+}
 
 /// Decode embedded WAV bytes to a flat f32 sample vector (i16 or f32), failing on
 /// any decode error. Used for the fixed pre-EQ IR.
@@ -401,6 +412,13 @@ struct StandaloneApp {
     cabinet_max_block: Arc<AtomicUsize>,
     cabinet_error: Arc<Mutex<Option<String>>>,
 
+    #[cfg(feature = "lab")]
+    lab: Option<Arc<Lab>>,
+    #[cfg(feature = "lab")]
+    lab_error: Arc<Mutex<Option<String>>>,
+    #[cfg(feature = "lab")]
+    lab_ui: LabUiState,
+
     tx_cmd: Sender<AudioCommand>,
     rx_event: Receiver<AudioEvent>,
 }
@@ -643,6 +661,12 @@ fn audio_worker(
                                             let mut crossfade_sample = CROSSFADE_LEN;
                                             let mut crossfade_buf =
                                                 vec![vec![0.0; buffer_size as usize]; 2];
+                                            #[cfg(feature = "lab")]
+                                            let mut lab_pipeline =
+                                                PipelineManager::from_categories(
+                                                    &default_categories(),
+                                                )
+                                                .ok();
 
                                             device.build_input_stream(
                                                 &strict_config,
@@ -872,6 +896,20 @@ fn audio_worker(
                                                                 *r *= snap.neural_amp_volume;
                                                             }
                                                         }
+
+                                                        #[cfg(feature = "lab")]
+                                                        if let Some(pipeline) =
+                                                            lab_pipeline.as_mut()
+                                                        {
+                                                            pipeline.process_block(
+                                                                buf_l.as_mut_ptr(),
+                                                                max_len,
+                                                            );
+                                                            pipeline.process_block(
+                                                                buf_r.as_mut_ptr(),
+                                                                max_len,
+                                                            );
+                                                        }
                                                     }
 
                                                     // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
@@ -1054,6 +1092,18 @@ impl StandaloneApp {
         let cabinet_sr = Arc::new(AtomicU32::new(48_000));
         let cabinet_max_block = Arc::new(AtomicUsize::new(2048));
         let cabinet_error = Arc::new(Mutex::new(None));
+        #[cfg(feature = "lab")]
+        let lab_error = Arc::new(Mutex::new(None));
+        #[cfg(feature = "lab")]
+        let lab = match lab_data_dir().and_then(Lab::init) {
+            Ok(lab) => Some(Arc::new(lab)),
+            Err(err) => {
+                if let Ok(mut slot) = lab_error.lock() {
+                    *slot = Some(err.to_string());
+                }
+                None
+            }
+        };
 
         // Resolve the persisted (or seeded default) selection into the shared state.
         let mut initial_state = StandaloneState::default();
@@ -1127,6 +1177,12 @@ impl StandaloneApp {
             cabinet_sr,
             cabinet_max_block,
             cabinet_error,
+            #[cfg(feature = "lab")]
+            lab,
+            #[cfg(feature = "lab")]
+            lab_error,
+            #[cfg(feature = "lab")]
+            lab_ui: LabUiState::default(),
             tx_cmd,
             rx_event,
         };
@@ -1288,6 +1344,14 @@ impl eframe::App for StandaloneApp {
                         AmpModel::Neural => ActivePanel::NeuralAmp,
                         AmpModel::MlcZeroV => ActivePanel::MlcZeroV,
                     };
+                }
+
+                #[cfg(feature = "lab")]
+                {
+                    ui.separator();
+                    if ui.button("Lab").clicked() {
+                        self.lab_ui.is_open = !self.lab_ui.is_open;
+                    }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2261,6 +2325,17 @@ impl eframe::App for StandaloneApp {
                 );
             },
         );
+
+        #[cfg(feature = "lab")]
+        {
+            let lab_error = self.lab_error.lock().ok().and_then(|error| error.clone());
+            draw_lab_panel(
+                ctx,
+                self.lab.as_deref(),
+                &mut self.lab_ui,
+                lab_error.as_deref(),
+            );
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

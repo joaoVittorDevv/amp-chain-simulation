@@ -28,6 +28,29 @@
 | AMP-06 | MLC ZERO V UI panel (egui controls) | P1 | Planning |
 | AMP-07 | Standalone parity for MLC controls | P1 | Planning |
 
+## v0.3 — Component Lab — Snapshot & Export System
+
+**Status:** 🔴 Planning
+
+| ID | Feature | Priority | Status |
+|----|---------|----------|--------|
+| LAB-01 | Save component snapshots with versioning | P1 | Planning |
+| LAB-02 | Verification checklist generation on save | P1 | Planning |
+| LAB-03 | Snapshot save error handling + rollback | P1 | Planning |
+| LAB-04 | Load & restore snapshots | P1 | Planning |
+| LAB-05 | DSP recompilation on snapshot load | P1 | Planning |
+| LAB-06 | Revert on snapshot load failure | P1 | Planning |
+| LAB-07 | Multiple variants per node | P1 | Planning |
+| LAB-08 | Async variant switching with loading state | P1 | Planning |
+| LAB-09 | Audio silence during variant switch | P1 | Planning |
+| LAB-10 | Revert on variant switch failure | P1 | Planning |
+| LAB-11 | AI-readable snapshot export (variant.json) | P1 | Planning |
+| LAB-12 | MANIFEST.json + SHA256 integrity verification | P1 | Planning |
+| LAB-13 | LLM integration guide in exports | P1 | Planning |
+| LAB-14 | Category slot enforcement (1 node per category) | P1 | Planning |
+| LAB-15 | Automated verification checks | P2 | Planning |
+| LAB-16 | Status gating for export readiness | P2 | Planning |
+
 ## Future
 
 | ID | Feature | Priority |
