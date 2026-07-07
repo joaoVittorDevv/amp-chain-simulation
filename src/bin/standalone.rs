@@ -129,7 +129,7 @@ impl Default for StandaloneState {
             mlc_warclaw: false,
             mlc_feedback: MlcFeedback::Hi,
             mlc_gate_pos: MlcGatePos::Pre,
-            mlc_clip_type: ClipType::Tanh,
+            mlc_clip_type: ClipType::AsymmetricTanh,
             eq_tanh_bypass: false,
             gain: 1.0,
             bypass: false,
@@ -2069,7 +2069,7 @@ impl eframe::App for StandaloneApp {
                 use egui_knob::{Knob, KnobStyle};
                 ui.horizontal_wrapped(|ui| {
                     ui.group(|ui| {
-                        ui.label(egui::RichText::new("Gain").strong());
+                        ui.label(egui::RichText::new("Gain + Clip").strong());
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label("Gain");
@@ -2104,6 +2104,28 @@ impl eframe::App for StandaloneApp {
                                         .small()
                                         .monospace(),
                                 );
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("Clip");
+                                let mut clip_type = snap_ui.mlc_clip_type;
+                                egui::ComboBox::from_id_salt("standalone_mlc_clip_type")
+                                    .width(130.0)
+                                    .selected_text(clip_type.label())
+                                    .show_ui(ui, |ui| {
+                                        for clip in ClipType::ALL {
+                                            ui.selectable_value(
+                                                &mut clip_type,
+                                                clip,
+                                                clip.label(),
+                                            );
+                                        }
+                                    });
+                                if clip_type != snap_ui.mlc_clip_type {
+                                    changed = true;
+                                    if let Ok(mut st) = self.standalone_state.lock() {
+                                        st.mlc_clip_type = clip_type;
+                                    }
+                                }
                             });
                         });
                     });
@@ -2275,35 +2297,6 @@ impl eframe::App for StandaloneApp {
                                 st.mlc_gate_pos = gate_pos;
                                 st.mlc_m45 = m45;
                                 st.mlc_warclaw = warclaw;
-                            }
-                        }
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Clipping").strong());
-                        let mut clip_type = snap_ui.mlc_clip_type;
-                        ui.vertical(|ui| {
-                            egui::ComboBox::from_id_salt("standalone_mlc_clip_type")
-                                .width(200.0)
-                                .selected_text(clip_type.label())
-                                .show_ui(ui, |ui| {
-                                    for clip in ClipType::ALL {
-                                        ui.selectable_value(
-                                            &mut clip_type,
-                                            clip,
-                                            clip.description(),
-                                        );
-                                    }
-                                });
-                            ui.label(
-                                egui::RichText::new(clip_type.description())
-                                    .small()
-                                    .color(egui::Color32::GRAY),
-                            );
-                        });
-                        if clip_type != snap_ui.mlc_clip_type {
-                            changed = true;
-                            if let Ok(mut st) = self.standalone_state.lock() {
-                                st.mlc_clip_type = clip_type;
                             }
                         }
                     });

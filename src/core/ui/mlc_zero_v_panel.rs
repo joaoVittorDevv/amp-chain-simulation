@@ -152,11 +152,12 @@ fn gate_pos_switch(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<Ml
 fn clip_type_combo(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<ClipType>) {
     let mut value = param.value();
     egui::ComboBox::from_id_salt("mlc_clip_type_combo")
-        .width(200.0)
+        .width(130.0)
         .selected_text(value.label())
         .show_ui(ui, |ui| {
             for clip in ClipType::ALL {
-                ui.selectable_value(&mut value, clip, clip.description());
+                ui.selectable_value(&mut value, clip, clip.label())
+                    .on_hover_text(clip.description());
             }
         });
     if value != param.value() {
@@ -169,10 +170,18 @@ fn clip_type_combo(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<Cl
 pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &Arc<BaseIOParams>) {
     ui.horizontal_wrapped(|ui| {
         ui.group(|ui| {
-            ui.label(egui::RichText::new("Gain").strong());
+            ui.label(egui::RichText::new("Gain + Clip").strong());
             ui.horizontal(|ui| {
                 param_knob(ui, setter, "Gain", &params.mlc_gain);
                 param_knob(ui, setter, "Master", &params.mlc_master);
+                ui.vertical(|ui| {
+                    ui.label(
+                        egui::RichText::new("Clip")
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
+                    clip_type_combo(ui, setter, &params.mlc_clip_type);
+                });
             });
         });
         ui.group(|ui| {
@@ -206,17 +215,6 @@ pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &A
         ui.group(|ui| {
             ui.label(egui::RichText::new("Gate").strong());
             param_knob(ui, setter, "Threshold", &params.mlc_gate);
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Clipping").strong());
-            ui.vertical(|ui| {
-                clip_type_combo(ui, setter, &params.mlc_clip_type);
-                ui.label(
-                    egui::RichText::new(params.mlc_clip_type.value().description())
-                        .small()
-                        .color(egui::Color32::GRAY),
-                );
-            });
         });
         ui.group(|ui| {
             ui.label(egui::RichText::new("LIMITER").strong());

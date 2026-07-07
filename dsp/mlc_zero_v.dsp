@@ -15,47 +15,17 @@ m45 = nentry("M45", 0.0, 0.0, 1.0, 1.0);
 warclaw = nentry("WARCLAW", 0.0, 0.0, 1.0, 1.0);
 feedback = nentry("Feedback", 1.0, 0.0, 1.0, 1.0);
 gate_pos = nentry("Gate Pos", 0.0, 0.0, 1.0, 1.0);
-clip_type = nentry("Clip Type", 0, 0, 10, 1);
+clip_type = nentry("Clip Type", 0, 0, 1, 1);
 
 // --- Selectable clipping / saturation curves ---
-// sign helper (avoid signum which may be unavailable)
-sign_of(x) = ba.if(x > 0, 1.0, ba.if(x < 0, -1.0, 0.0));
-
-// 0  Tanh (default)      - smooth, creamy tube-like compression
-clip_tanh(x)  = ma.tanh(x);
-// 1  Hard Clip           - abrupt transistor-fuzz clip
-clip_hard(x)  = min(max(x, -0.5), 0.5);
-// 2  Soft Sine           - very soft, edge of breakup
-clip_sine(x)  = sin(max(0.0 - ma.PI / 2.0, min(ma.PI / 2.0, x)));
-// 3  ArcTan              - more open than tanh
-clip_atan(x)  = 2.0 / ma.PI * atan(ma.PI / 2.0 * x);
-// 4  Algebraic           - creamy mids, less fizz
-clip_alg(x)   = x / sqrt(1.0 + x * x);
-// 5  Rational            - aggressive, germanium fuzz
-clip_rat(x)   = x / (1.0 + abs(x));
-// 6  Exponential         - very aggressive
-clip_exp(x)   = (1.0 - exp(0.0 - abs(x))) * sign_of(x);
-// 7  Cubic               - clean boost with slight saturation
-clip_cubic(x) = min(max(x - x * x * x / 3.0, -0.667), 0.667);
-// 8  Asymmetric Tanh     - DC bias, even harmonics
+// 0  Asymmetric Tanh     - DC bias, even harmonics (default)
 clip_atanh(x) = ma.tanh(x + 0.25) - ma.tanh(0.25);
-// 9  Wave Fold           - metallic / djent wavefolding
-clip_fold(x)  = x - 2.0 * max(0.0, abs(x) - 0.6) * sign_of(x);
-// 10 Asymmetric Hard     - hard clip, different thresholds
-clip_ahard(x) = min(max(x, -0.6), 0.35);
+// 1  Exponential         - very aggressive (RAT/DS-1 voicing)
+clip_exp(x)   = (1.0 - exp(0.0 - abs(x))) * ba.if(x > 0, 1.0, ba.if(x < 0, -1.0, 0.0));
 
-clip(x) = ba.selectn(11, int(clip_type),
-    clip_tanh(x),
-    clip_hard(x),
-    clip_sine(x),
-    clip_atan(x),
-    clip_alg(x),
-    clip_rat(x),
-    clip_exp(x),
-    clip_cubic(x),
+clip(x) = ba.selectn(2, int(clip_type),
     clip_atanh(x),
-    clip_fold(x),
-    clip_ahard(x));
+    clip_exp(x));
 
 gate_thresh = ba.db2linear(gate_thresh_db);
 gate_env(x) = x : abs : max ~ *(0.995);

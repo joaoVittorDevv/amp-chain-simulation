@@ -129,7 +129,7 @@ impl MlcZeroVProcessor {
     }
     #[inline(always)]
     pub fn set_clip_type(&mut self, value: f32) {
-        self.clip_type = value.clamp(0.0, 10.0).round();
+        self.clip_type = value.clamp(0.0, 1.0).round();
     }
 }
 
@@ -322,7 +322,7 @@ fn mlc_zero_v_param_metadata() -> Vec<ParameterMeta> {
         ("mlc_warclaw", "MLC WARCLAW", (0.0, 1.0), 0.0, None),
         ("mlc_feedback", "MLC Feedback", (0.0, 1.0), 1.0, None),
         ("mlc_gate_pos", "MLC Gate Pos", (0.0, 1.0), 0.0, None),
-        ("mlc_clip_type", "MLC Clip Type", (0.0, 10.0), 0.0, None),
+        ("mlc_clip_type", "MLC Clip Type", (0.0, 1.0), 0.0, None),
     ]
     .into_iter()
     .enumerate()
@@ -359,11 +359,11 @@ mod tests {
         assert!(processor.set_param("mlc_bright", 0.0));
         assert_eq!(processor.get_param("mlc_bright"), Some(0.0));
 
-        // Clip type is quantized to the nearest valid curve index (0-10).
-        assert!(processor.set_param("mlc_clip_type", 9.0));
-        assert_eq!(processor.get_param("mlc_clip_type"), Some(9.0));
+        // Clip type is quantized to the nearest valid curve index (0-1).
+        assert!(processor.set_param("mlc_clip_type", 1.0));
+        assert_eq!(processor.get_param("mlc_clip_type"), Some(1.0));
         assert!(processor.set_param("mlc_clip_type", 42.0));
-        assert_eq!(processor.get_param("mlc_clip_type"), Some(10.0));
+        assert_eq!(processor.get_param("mlc_clip_type"), Some(1.0));
 
         assert_eq!(processor.get_param("missing"), None);
     }
