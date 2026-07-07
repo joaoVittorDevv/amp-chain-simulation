@@ -7,7 +7,7 @@ include!(concat!(env!("OUT_DIR"), "/bindings_mlc_zero_v.rs"));
 
 use super::ExternalProcessor;
 #[cfg(feature = "lab")]
-use crate::lab::DspVariant;
+use crate::lab::{DspVariant, ParameterMeta};
 
 #[cfg(feature = "lab")]
 pub const MLC_ZERO_V_IMPL_ID: &str = "mlc-zero-v";
@@ -168,6 +168,49 @@ impl ExternalProcessor for MlcZeroVProcessor {
             mlc_zero_v_process(self.handle, buffer, length as _);
         }
     }
+
+    fn get_param(&self, id: &str) -> Option<f32> {
+        match id {
+            "mlc_gain" => Some(self.gain),
+            "mlc_master" => Some(self.master),
+            "mlc_bass" => Some(self.bass),
+            "mlc_middle" => Some(self.middle),
+            "mlc_treble" => Some(self.treble),
+            "mlc_presence" => Some(self.presence),
+            "mlc_depth" => Some(self.depth),
+            "mlc_gate" => Some(self.gate),
+            "mlc_bright" => Some(self.bright),
+            "mlc_m45" => Some(self.m45),
+            "mlc_warclaw" => Some(self.warclaw),
+            "mlc_feedback" => Some(self.feedback),
+            "mlc_gate_pos" => Some(self.gate_pos),
+            _ => None,
+        }
+    }
+
+    fn set_param(&mut self, id: &str, value: f32) -> bool {
+        match id {
+            "mlc_gain" => self.set_gain(value),
+            "mlc_master" => self.set_master(value),
+            "mlc_bass" => self.set_bass(value),
+            "mlc_middle" => self.set_middle(value),
+            "mlc_treble" => self.set_treble(value),
+            "mlc_presence" => self.set_presence(value),
+            "mlc_depth" => self.set_depth(value),
+            "mlc_gate" => self.set_gate(value),
+            "mlc_bright" => self.set_bright(enum_value(value)),
+            "mlc_m45" => self.set_m45(value >= 0.5),
+            "mlc_warclaw" => self.set_warclaw(value >= 0.5),
+            "mlc_feedback" => self.set_feedback(enum_value(value)),
+            "mlc_gate_pos" => self.set_gate_pos(enum_value(value)),
+            _ => return false,
+        }
+        true
+    }
+
+    fn param_metadata(&self) -> Vec<ParameterMeta> {
+        mlc_zero_v_param_metadata()
+    }
 }
 
 #[cfg(feature = "lab")]
@@ -186,6 +229,18 @@ impl DspVariant for MlcZeroVProcessor {
 
     fn latency(&self) -> usize {
         0
+    }
+
+    fn get_param(&self, id: &str) -> Option<f32> {
+        ExternalProcessor::get_param(self, id)
+    }
+
+    fn set_param(&mut self, id: &str, value: f32) -> bool {
+        ExternalProcessor::set_param(self, id, value)
+    }
+
+    fn param_metadata(&self) -> Vec<ParameterMeta> {
+        ExternalProcessor::param_metadata(self)
     }
 }
 
@@ -207,6 +262,17 @@ impl DspVariant for MlcZeroVBypassVariant {
     fn latency(&self) -> usize {
         0
     }
+
+    fn get_param(&self, id: &str) -> Option<f32> {
+        mlc_zero_v_param_metadata()
+            .into_iter()
+            .find(|meta| meta.id == id)
+            .map(|meta| meta.default)
+    }
+
+    fn param_metadata(&self) -> Vec<ParameterMeta> {
+        mlc_zero_v_param_metadata()
+    }
 }
 
 #[cfg(feature = "lab")]
@@ -217,5 +283,70 @@ pub fn mlc_zero_v_factory(sample_rate: f32) -> Box<dyn DspVariant> {
             Box::new(processor)
         }
         None => Box::new(MlcZeroVBypassVariant),
+    }
+}
+
+fn enum_value(value: f32) -> f32 {
+    value.clamp(0.0, 1.0).round()
+}
+
+#[cfg(feature = "lab")]
+fn mlc_zero_v_param_metadata() -> Vec<ParameterMeta> {
+    [
+        ("mlc_gain", "MLC Gain", (0.001, 1.0), 0.25118864, Some("dB")),
+        ("mlc_master", "MLC Master", (0.001, 1.0), 0.5011872, Some("dB")),
+        ("mlc_bass", "MLC Bass", (-12.0, 12.0), 0.0, Some("dB")),
+        ("mlc_middle", "MLC Middle", (-12.0, 12.0), 0.0, Some("dB")),
+        ("mlc_treble", "MLC Treble", (-12.0, 12.0), 0.0, Some("dB")),
+        (
+            "mlc_presence",
+            "MLC Presence",
+            (-12.0, 12.0),
+            0.0,
+            Some("dB"),
+        ),
+        ("mlc_depth", "MLC Depth", (-12.0, 12.0), 0.0, Some("dB")),
+        ("mlc_gate", "MLC Gate", (-80.0, 0.0), -80.0, Some("dB")),
+        ("mlc_bright", "MLC Bright", (0.0, 1.0), 1.0, None),
+        ("mlc_m45", "MLC M45", (0.0, 1.0), 0.0, None),
+        ("mlc_warclaw", "MLC WARCLAW", (0.0, 1.0), 0.0, None),
+        ("mlc_feedback", "MLC Feedback", (0.0, 1.0), 1.0, None),
+        ("mlc_gate_pos", "MLC Gate Pos", (0.0, 1.0), 0.0, None),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (id, name, range, default, unit))| ParameterMeta {
+        id: id.to_string(),
+        name: name.to_string(),
+        description: name.to_string(),
+        range,
+        default,
+        unit: unit.map(str::to_string),
+        smoothing: "50 ms".to_string(),
+        index: index as u32,
+    })
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MlcZeroVProcessor;
+    use crate::bridge::ExternalProcessor;
+
+    #[test]
+    fn test_mlc_get_param_returns_stored_value() {
+        let mut processor = MlcZeroVProcessor::new().expect("mlc processor");
+
+        processor.set_gain(0.5);
+        processor.set_m45(true);
+        processor.set_feedback(0.0);
+
+        assert_eq!(processor.get_param("mlc_gain"), Some(0.5));
+        assert_eq!(processor.get_param("mlc_m45"), Some(1.0));
+        assert_eq!(processor.get_param("mlc_feedback"), Some(0.0));
+
+        assert!(processor.set_param("mlc_bright", 0.0));
+        assert_eq!(processor.get_param("mlc_bright"), Some(0.0));
+        assert_eq!(processor.get_param("missing"), None);
     }
 }

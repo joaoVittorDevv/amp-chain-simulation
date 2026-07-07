@@ -1,4 +1,4 @@
-use crate::lab::DspVariant;
+use crate::lab::{DspVariant, ParameterMeta};
 use arc_swap::ArcSwapOption;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -167,6 +167,48 @@ impl VariantSlot {
     /// Return whether this slot currently has an active variant.
     pub fn has_current(&self) -> bool {
         self.current.is_some()
+    }
+
+    /// Read a parameter from the active variant.
+    ///
+    /// This inspects the audio-thread-owned variant and should not be called
+    /// from the audio thread while `process_block` is running.
+    pub fn get_param(&self, id: &str) -> Option<f32> {
+        self.current
+            .as_ref()
+            .and_then(|variant| variant.get_param(id))
+    }
+
+    /// Set a parameter on the active variant.
+    ///
+    /// This mutates the audio-thread-owned variant and should not be called
+    /// from the audio thread while `process_block` is running.
+    pub fn set_param(&mut self, id: &str, value: f32) -> bool {
+        let Some(variant_arc) = self.current.as_mut() else {
+            return false;
+        };
+
+        match Arc::get_mut(variant_arc) {
+            Some(variant) => variant.set_param(id, value),
+            None => {
+                debug_assert!(
+                    false,
+                    "variant runtime Arc unexpectedly shared; get_mut failed"
+                );
+                false
+            }
+        }
+    }
+
+    /// Return metadata for the active variant's parameters.
+    ///
+    /// This inspects the audio-thread-owned variant and should not be called
+    /// from the audio thread while `process_block` is running.
+    pub fn param_metadata(&self) -> Vec<ParameterMeta> {
+        self.current
+            .as_ref()
+            .map(|variant| variant.param_metadata())
+            .unwrap_or_default()
     }
 }
 

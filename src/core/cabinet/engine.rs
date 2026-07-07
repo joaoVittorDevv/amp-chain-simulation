@@ -113,6 +113,9 @@ pub struct CabinetEngine {
     /// Length of each fade phase in samples (~half of `MUTE_RAMP_MS`).
     ramp_len: usize,
     bypass_fade: BypassFade,
+    pub cabinet_bypass: bool,
+    pub cabinet_level: f32,
+    pub cabinet_mix: f32,
 }
 
 impl Default for CabinetEngine {
@@ -137,6 +140,9 @@ impl CabinetEngine {
             ramp_remaining: 0,
             ramp_len: ((MUTE_RAMP_MS * 0.001 * 48_000.0) * 0.5) as usize,
             bypass_fade: BypassFade::new(),
+            cabinet_bypass: false,
+            cabinet_level: 1.0,
+            cabinet_mix: 1.0,
         }
     }
 
@@ -238,6 +244,10 @@ impl CabinetEngine {
         mix: f32,
     ) {
         self.poll_commands();
+
+        self.cabinet_bypass = bypass;
+        self.cabinet_level = level;
+        self.cabinet_mix = mix;
 
         let len = left
             .len()

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
+use crate::lab::snapshot::ParameterMeta;
+
 /// Metadata describing a component category stored in the lab database.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Category {
@@ -360,6 +362,21 @@ pub trait DspVariant: Send {
 
     /// Return latency in samples.
     fn latency(&self) -> usize;
+
+    /// Read the current runtime value of a parameter by its ID.
+    fn get_param(&self, _id: &str) -> Option<f32> {
+        None
+    }
+
+    /// Set a parameter value by its ID.
+    fn set_param(&mut self, _id: &str, _value: f32) -> bool {
+        false
+    }
+
+    /// Return metadata for all parameters exposed by this variant.
+    fn param_metadata(&self) -> Vec<ParameterMeta> {
+        Vec::new()
+    }
 }
 
 #[cfg(test)]

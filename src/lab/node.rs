@@ -1,4 +1,6 @@
-use crate::lab::{LabError, VariantFactory, VariantMailbox, VariantRegistry, VariantSlot};
+use crate::lab::{
+    LabError, ParameterMeta, VariantFactory, VariantMailbox, VariantRegistry, VariantSlot,
+};
 use std::sync::Arc;
 
 /// Loading state for a lab DSP node.
@@ -130,6 +132,27 @@ impl Node {
     /// Process the active variant in-place, or pass through if none is active.
     pub fn process_block(&mut self, buffer: *mut f32, length: usize) {
         self.slot.process_block(buffer, length);
+    }
+
+    /// Read a parameter value from the active variant.
+    ///
+    /// Not real-time safe: inspects the audio-thread-owned variant and must not
+    /// be called from the audio callback while `process_block` runs.
+    pub fn get_param(&self, id: &str) -> Option<f32> {
+        self.slot.get_param(id)
+    }
+
+    /// Set a parameter value on the active variant.
+    ///
+    /// Not real-time safe: mutates the audio-thread-owned variant and must not
+    /// be called from the audio callback while `process_block` runs.
+    pub fn set_param(&mut self, id: &str, value: f32) -> bool {
+        self.slot.set_param(id, value)
+    }
+
+    /// Metadata for the active variant's parameters.
+    pub fn param_metadata(&self) -> Vec<ParameterMeta> {
+        self.slot.param_metadata()
     }
 }
 

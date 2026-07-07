@@ -195,6 +195,27 @@ impl Database {
             .ok_or_else(|| LabError::InvalidData(format!("variant '{id}' was not inserted")))
     }
 
+    /// Insert or update one DSP variant row and return the stored metadata.
+    pub fn upsert_variant(
+        &self,
+        id: &str,
+        node_id: &str,
+        name: &str,
+        impl_id: &str,
+    ) -> Result<VariantMeta, LabError> {
+        self.conn.execute(
+            "INSERT INTO variants (id, node_id, name, impl_id)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET
+                node_id = excluded.node_id,
+                name = excluded.name,
+                impl_id = excluded.impl_id",
+            params![id, node_id, name, impl_id],
+        )?;
+        self.load_variant(id)?
+            .ok_or_else(|| LabError::InvalidData(format!("variant '{id}' was not upserted")))
+    }
+
     /// Load one variant metadata row by id.
     pub fn load_variant(&self, id: &str) -> Result<Option<VariantMeta>, LabError> {
         self.conn
@@ -276,6 +297,13 @@ impl Database {
         Ok(())
     }
 
+    /// Delete a snapshot and its cascading dependency and verification rows.
+    pub fn delete_snapshot(&self, id: &str) -> Result<(), LabError> {
+        self.conn
+            .execute("DELETE FROM snapshots WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     /// Load a full snapshot by id.
     pub fn load_snapshot(&self, id: &str) -> Result<Option<SnapshotFull>, LabError> {
         let row = self
@@ -342,7 +370,7 @@ impl Database {
         }))
     }
 
-    /// List snapshot metadata for a variant in creation order.
+    /// List snapshot metadata for a variant with newest snapshots first.
     pub fn list_snapshots_for_variant(
         &self,
         variant_id: &str,
@@ -351,7 +379,7 @@ impl Database {
             "SELECT id, variant_id, version, status, variant_impl_id, params_hash, created_at, notes
              FROM snapshots
              WHERE variant_id = ?1
-             ORDER BY created_at ASC, id ASC",
+             ORDER BY created_at DESC, id DESC",
         )?;
         let rows = stmt.query_map(params![variant_id], |row| {
             Ok((
@@ -769,6 +797,62 @@ mod tests {
         assert_eq!(loaded.meta, full.meta);
         assert_eq!(loaded.data, full.data);
         assert_eq!(db.dependency_count_for_snapshot("snapshot-1").unwrap(), 2);
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn list_snapshots_for_variant_orders_newest_first() {
+        let path = temp_db_path("snapshot-order");
+        let db = Database::open(&path).expect("open database");
+        seed_variant(&db);
+
+        let mut first = snapshot("snapshot-1", "1.0.0");
+        first.meta.created_at = "2026-07-07T12:00:00Z".to_string();
+        let mut second = snapshot("snapshot-2", "1.0.1");
+        second.meta.created_at = "2026-07-07T12:01:00Z".to_string();
+        let mut third = snapshot("snapshot-3", "1.0.2");
+        third.meta.created_at = "2026-07-07T12:01:00Z".to_string();
+
+        db.save_snapshot(&first).expect("save first");
+        db.save_snapshot(&second).expect("save second");
+        db.save_snapshot(&third).expect("save third");
+
+        let snapshots = db
+            .list_snapshots_for_variant("variant-eq")
+            .expect("list snapshots");
+
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["snapshot-3", "snapshot-2", "snapshot-1"]
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn delete_snapshot_removes_it_from_listing() {
+        let path = temp_db_path("snapshot-delete");
+        let db = Database::open(&path).expect("open database");
+        seed_variant(&db);
+
+        db.save_snapshot(&snapshot("snapshot-1", "1.0.0"))
+            .expect("save snapshot");
+        assert_eq!(
+            db.list_snapshots_for_variant("variant-eq")
+                .expect("list snapshots")
+                .len(),
+            1
+        );
+
+        db.delete_snapshot("snapshot-1").expect("delete snapshot");
+        assert!(db
+            .list_snapshots_for_variant("variant-eq")
+            .expect("list snapshots")
+            .is_empty());
 
         let _ = std::fs::remove_file(path);
     }

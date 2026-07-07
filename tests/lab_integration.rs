@@ -1,6 +1,6 @@
 use distortion::lab::{
     default_categories, Category, ComponentMeta, CrateDep, Database, DependencyList, DspConfig,
-    DspEngine, DspVariant, FaustLib, FfiInterface, IntegrationGuide, PipelineManager,
+    DspEngine, DspVariant, FaustLib, FfiInterface, IntegrationGuide, Lab, PipelineManager,
     RoutingConfig, SnapshotData, SnapshotFull, SnapshotMeta, SnapshotStatus, SourceFile,
     SystemTool, VerificationCheckDef,
 };
@@ -46,6 +46,14 @@ fn temp_db_path(name: &str) -> PathBuf {
         .expect("clock")
         .as_nanos();
     std::env::temp_dir().join(format!("distortion-lab-integration-{name}-{nonce}.db"))
+}
+
+fn temp_lab_dir(name: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock")
+        .as_nanos();
+    std::env::temp_dir().join(format!("distortion-lab-integration-{name}-{nonce}"))
 }
 
 fn category(id: &str, order: i64) -> Category {
@@ -211,4 +219,147 @@ fn amp_exclusivity_is_enforced() {
         .expect_err("exclusive amps");
 
     assert!(err.to_string().contains("cannot both be active"));
+}
+
+#[test]
+fn lab_load_snapshot_applies_snapshot_variant_to_pipeline_config() {
+    let dir = temp_lab_dir("load-applies-variant");
+    let lab = Lab::init(dir.clone()).expect("init lab");
+    let mut full = snapshot(0.5);
+    full.meta.id = "snapshot-mojo-neural".to_string();
+    full.meta.variant_id = "mojo-neural".to_string();
+    full.meta.variant_impl_id = "mojo-neural".to_string();
+    full.meta.version = "1.0.1".to_string();
+    full.data.component.name = "Amp Modeler".to_string();
+    full.data.component.category = "amp-modeler".to_string();
+    full.data.component.variant_id = "mojo-neural".to_string();
+    full.data.component.version = full.meta.version.clone();
+
+    lab.save_snapshot(&full).expect("save snapshot");
+    lab.switch_variant("amp-modeler", "mlc-zero-v")
+        .expect("switch away from snapshot variant");
+
+    let before = lab
+        .db()
+        .lock()
+        .expect("db lock")
+        .load_pipeline("default")
+        .expect("load pipeline")
+        .expect("pipeline exists");
+    assert_eq!(
+        before
+            .slots
+            .iter()
+            .find(|slot| slot.category_id == "amp-modeler")
+            .and_then(|slot| slot.active_variant_id.as_deref()),
+        Some("mlc-zero-v")
+    );
+
+    let loaded = lab.load_snapshot(&full.meta.id).expect("load snapshot");
+    assert_eq!(loaded.meta.id, full.meta.id);
+
+    let after = lab
+        .db()
+        .lock()
+        .expect("db lock")
+        .load_pipeline("default")
+        .expect("load pipeline")
+        .expect("pipeline exists");
+    assert_eq!(
+        after
+            .slots
+            .iter()
+            .find(|slot| slot.category_id == "amp-modeler")
+            .and_then(|slot| slot.active_variant_id.as_deref()),
+        Some("mojo-neural")
+    );
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_snapshot_captures_parameter_values() {
+    let dir = temp_lab_dir("snapshot-captures-params");
+    let lab = Lab::init(dir.clone()).expect("init lab");
+
+    // Activate the Faust EQ variant so its runtime parameters can be read back.
+    lab.switch_variant("eq", "faust-eq").expect("switch variant");
+
+    let mut full = snapshot(0.0);
+    full.meta.id = "snapshot-capture-eq".to_string();
+    full.meta.variant_id = "faust-eq".to_string();
+    full.meta.variant_impl_id = "faust-eq".to_string();
+    full.data.component.category = "eq".to_string();
+    full.data.component.variant_id = "faust-eq".to_string();
+    // Start with no stored values: save_snapshot must populate them from runtime.
+    full.data.parameter_values.clear();
+    full.data.parameter_metadata.clear();
+
+    lab.save_snapshot(&full).expect("save snapshot");
+
+    let loaded = lab.load_snapshot(&full.meta.id).expect("load snapshot");
+    assert_eq!(loaded.data.parameter_values.len(), 9);
+    assert_eq!(loaded.data.parameter_metadata.len(), 9);
+
+    let low_freq = loaded
+        .data
+        .parameter_values
+        .iter()
+        .find(|param| param.id == "eq_low_freq")
+        .expect("eq_low_freq captured");
+    assert_eq!(low_freq.value, 100.0);
+
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn test_load_snapshot_applies_parameter_values() {
+    let dir = temp_lab_dir("load-applies-params");
+    let lab = Lab::init(dir.clone()).expect("init lab");
+
+    // A snapshot carrying an explicit, non-default parameter value. The eq slot is
+    // left inactive so save_snapshot's capture pass does not overwrite the value.
+    let mut full = snapshot(0.0);
+    full.meta.id = "snapshot-eq-params".to_string();
+    full.meta.variant_id = "faust-eq".to_string();
+    full.meta.variant_impl_id = "faust-eq".to_string();
+    full.data.component.category = "eq".to_string();
+    full.data.component.variant_id = "faust-eq".to_string();
+    full.data.parameter_values = vec![distortion::lab::ParamValue {
+        id: "eq_low_gain".to_string(),
+        value: 6.0,
+    }];
+    full.data.parameter_metadata.clear();
+
+    lab.save_snapshot(&full).expect("save snapshot");
+
+    // Loading applies the saved variant and parameter values without error and
+    // preserves the stored value in the returned snapshot.
+    let loaded = lab.load_snapshot(&full.meta.id).expect("load snapshot");
+    assert_eq!(loaded.data.parameter_values.len(), 1);
+    assert_eq!(loaded.data.parameter_values[0].id, "eq_low_gain");
+    assert_eq!(loaded.data.parameter_values[0].value, 6.0);
+
+    // Verify the apply mechanism used by load_snapshot mutates the live variant.
+    let (categories, config) = {
+        let db = lab.db().lock().expect("db lock");
+        let categories = db.list_categories().expect("categories");
+        let config = db
+            .load_pipeline("default")
+            .expect("load pipeline")
+            .expect("pipeline exists");
+        (categories, config)
+    };
+    let mut manager = PipelineManager::from_config(&categories, config).expect("manager");
+    let factory = lab.registry().get("faust-eq").expect("faust factory");
+    manager
+        .request_switch("eq", "faust-eq", factory, 48_000.0)
+        .expect("switch");
+    manager
+        .set_node_param("eq", "eq_low_gain", 6.0)
+        .expect("set param");
+    let node = manager.get_node("eq").expect("eq node");
+    assert_eq!(node.get_param("eq_low_gain"), Some(6.0));
+
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -64,3 +64,4 @@ Desktop.ini
 # easy_calls.py
 # easy_request.py
 # start_standalone.sh
+.claude/settings.local.json

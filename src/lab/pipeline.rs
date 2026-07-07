@@ -158,6 +158,25 @@ impl PipelineManager {
         Ok(())
     }
 
+    /// Set a parameter on a category's active variant.
+    ///
+    /// Any pending mailbox variant is collected first so the value lands on the
+    /// live runtime. Unknown parameter ids are ignored. Not real-time safe:
+    /// intended for UI and snapshot-restore paths, never the audio thread.
+    pub fn set_node_param(
+        &mut self,
+        category_id: &str,
+        param_id: &str,
+        value: f32,
+    ) -> Result<(), LabError> {
+        let node = self.get_node_mut(category_id).ok_or_else(|| {
+            LabError::InvalidData(format!("category '{category_id}' is not registered"))
+        })?;
+        node.collect_mailbox();
+        node.set_param(param_id, value);
+        Ok(())
+    }
+
     /// Clear a category slot.
     pub fn clear_category(&mut self, category_id: &str) -> Result<(), LabError> {
         let slot = self.slot_mut(category_id).ok_or_else(|| {
