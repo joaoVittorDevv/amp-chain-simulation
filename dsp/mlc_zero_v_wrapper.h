@@ -42,6 +42,23 @@ void mlc_zero_v_set_preshape(FaustHandle handle, float value);
 void mlc_zero_v_set_preshape_tight(FaustHandle handle, float value);
 void mlc_zero_v_set_preshape_bite(FaustHandle handle, float value);
 
+/* Tier 2.2 / 3.x additions */
+void mlc_zero_v_set_ts_model(FaustHandle handle, float value);
+void mlc_zero_v_set_tube_model(FaustHandle handle, float value);
+void mlc_zero_v_set_tube_drive(FaustHandle handle, float value);
+void mlc_zero_v_set_tube_bypass(FaustHandle handle, float value);
+void mlc_zero_v_set_nfb_presence(FaustHandle handle, float value);
+void mlc_zero_v_set_nfb_resonance(FaustHandle handle, float value);
+void mlc_zero_v_set_nfb_depth(FaustHandle handle, float value);
+void mlc_zero_v_set_nfb_bypass(FaustHandle handle, float value);
+void mlc_zero_v_set_mbc_bypass(FaustHandle handle, float value);
+void mlc_zero_v_set_mbc_cf_lo(FaustHandle handle, float value);
+void mlc_zero_v_set_mbc_cf_hi(FaustHandle handle, float value);
+void mlc_zero_v_set_mbc_drive_lo(FaustHandle handle, float value);
+void mlc_zero_v_set_mbc_drive_mid(FaustHandle handle, float value);
+void mlc_zero_v_set_mbc_drive_hi(FaustHandle handle, float value);
+void mlc_zero_v_set_adaa_order(FaustHandle handle, float value);
+
 #ifdef __cplusplus
 }
 #endif

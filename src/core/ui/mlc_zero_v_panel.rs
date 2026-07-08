@@ -1,9 +1,37 @@
 use crate::core::state::plugin_params::{
     BaseIOParams, ClipType, MlcBright, MlcFeedback, MlcGatePos, MlcTab,
 };
-use nih_plug::prelude::{BoolParam, EnumParam, FloatParam, ParamSetter};
+use nih_plug::prelude::{BoolParam, Enum, EnumParam, FloatParam, ParamSetter};
 use nih_plug_egui::egui;
 use std::sync::Arc;
+
+/// Generic dropdown for any `EnumParam<T>` whose `T` derives nih_plug's `Enum`
+/// (used for the Tone Stack / Tube / ADAA selectors, which have many variants).
+fn enum_combo<T>(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    id: &str,
+    width: f32,
+    param: &EnumParam<T>,
+) where
+    T: Enum + PartialEq + Copy + 'static,
+{
+    let mut value = param.value();
+    let names = T::variants();
+    egui::ComboBox::from_id_salt(id)
+        .width(width)
+        .selected_text(names.get(value.to_index()).copied().unwrap_or(""))
+        .show_ui(ui, |ui| {
+            for (i, name) in names.iter().enumerate() {
+                ui.selectable_value(&mut value, T::from_index(i), *name);
+            }
+        });
+    if value != param.value() {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, value);
+        setter.end_set_parameter(param);
+    }
+}
 
 fn param_knob(ui: &mut egui::Ui, setter: &ParamSetter, label: &str, param: &FloatParam) {
     use egui_knob::{Knob, KnobStyle};
@@ -204,6 +232,7 @@ pub fn draw_mlc_zero_v_panel(
         ui.selectable_value(mlc_tab, MlcTab::Tone, "Tone");
         ui.selectable_value(mlc_tab, MlcTab::GainClip, "Gain/Clip");
         ui.selectable_value(mlc_tab, MlcTab::Harmonics, "Harmonics");
+        ui.selectable_value(mlc_tab, MlcTab::PowerAmp, "Power Amp");
         ui.selectable_value(mlc_tab, MlcTab::Limiter, "Limiter");
     });
     ui.separator();
@@ -214,13 +243,21 @@ pub fn draw_mlc_zero_v_panel(
                 ui.group(|ui| {
                     ui.label(egui::RichText::new("EQ").strong());
                     ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Tone Stack")
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            );
+                            enum_combo(ui, setter, "mlc_ts_model", 130.0, &params.mlc_ts_model);
+                        });
                         param_knob(ui, setter, "Bass", &params.mlc_bass);
                         param_knob(ui, setter, "Middle", &params.mlc_middle);
                         param_knob(ui, setter, "Treble", &params.mlc_treble);
                     });
                 });
                 ui.group(|ui| {
-                    ui.label(egui::RichText::new("Power Amp").strong());
+                    ui.label(egui::RichText::new("Power Amp (EQ)").strong());
                     ui.horizontal(|ui| {
                         param_knob(ui, setter, "Presence", &params.mlc_presence);
                         param_knob(ui, setter, "Depth", &params.mlc_depth);
@@ -301,6 +338,34 @@ pub fn draw_mlc_zero_v_panel(
                         });
                     });
                 });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Tube").strong());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Model")
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            );
+                            enum_combo(ui, setter, "mlc_tube_model", 110.0, &params.mlc_tube_model);
+                            bool_switch(ui, setter, "Bypass", &params.mlc_tube_bypass);
+                        });
+                        param_knob_unit(ui, setter, "Drive", &params.mlc_tube_drive, 1, " dB");
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Multi-Band Clip").strong());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            bool_switch(ui, setter, "Bypass", &params.mlc_mbc_bypass);
+                            param_knob_unit(ui, setter, "XOver Lo", &params.mlc_mbc_cf_lo, 0, " Hz");
+                            param_knob_unit(ui, setter, "XOver Hi", &params.mlc_mbc_cf_hi, 0, " Hz");
+                        });
+                        param_knob(ui, setter, "Drv Lo", &params.mlc_mbc_drive_lo);
+                        param_knob(ui, setter, "Drv Mid", &params.mlc_mbc_drive_mid);
+                        param_knob(ui, setter, "Drv Hi", &params.mlc_mbc_drive_hi);
+                    });
+                });
             });
         }
         MlcTab::Harmonics => {
@@ -323,6 +388,41 @@ pub fn draw_mlc_zero_v_panel(
                             ui.label("even");
                         });
                     });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Quality (ADAA)").strong());
+                    ui.vertical(|ui| {
+                        ui.label(
+                            egui::RichText::new("Anti-alias order")
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                        enum_combo(ui, setter, "mlc_adaa_order", 90.0, &params.mlc_adaa_order);
+                    });
+                });
+            });
+        }
+        MlcTab::PowerAmp => {
+            ui.horizontal_wrapped(|ui| {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("NFB Loop").strong());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.add_space(14.0);
+                            bool_switch(ui, setter, "Bypass", &params.mlc_nfb_bypass);
+                        });
+                        param_knob(ui, setter, "Presence", &params.mlc_nfb_presence);
+                        param_knob(ui, setter, "Resonance", &params.mlc_nfb_resonance);
+                        param_knob(ui, setter, "Depth", &params.mlc_nfb_depth);
+                    });
+                    ui.label(
+                        egui::RichText::new(
+                            "Real negative-feedback power amp. Presence boosts highs, \
+                             Resonance boosts lows, Depth sets feedback amount.",
+                        )
+                        .small()
+                        .color(egui::Color32::GRAY),
+                    );
                 });
             });
         }

@@ -122,6 +122,22 @@ struct MlcBlockParams {
     h2: f32,
     h3: f32,
     h4: f32,
+    // Tier 2.2 / 3.x additions.
+    ts_model: f32,
+    tube_model: f32,
+    tube_drive: f32,
+    tube_bypass: bool,
+    nfb_presence: f32,
+    nfb_resonance: f32,
+    nfb_depth: f32,
+    nfb_bypass: bool,
+    mbc_bypass: bool,
+    mbc_cf_lo: f32,
+    mbc_cf_hi: f32,
+    mbc_drive_lo: f32,
+    mbc_drive_mid: f32,
+    mbc_drive_hi: f32,
+    adaa_order: f32,
 }
 
 #[inline(always)]
@@ -153,6 +169,21 @@ fn configure_mlc(mlc: &mut MlcZeroVProcessor, params: MlcBlockParams) {
     mlc.set_h2(params.h2);
     mlc.set_h3(params.h3);
     mlc.set_h4(params.h4);
+    mlc.set_ts_model(params.ts_model);
+    mlc.set_tube_model(params.tube_model);
+    mlc.set_tube_drive(params.tube_drive);
+    mlc.set_tube_bypass(params.tube_bypass);
+    mlc.set_nfb_presence(params.nfb_presence);
+    mlc.set_nfb_resonance(params.nfb_resonance);
+    mlc.set_nfb_depth(params.nfb_depth);
+    mlc.set_nfb_bypass(params.nfb_bypass);
+    mlc.set_mbc_bypass(params.mbc_bypass);
+    mlc.set_mbc_cf_lo(params.mbc_cf_lo);
+    mlc.set_mbc_cf_hi(params.mbc_cf_hi);
+    mlc.set_mbc_drive_lo(params.mbc_drive_lo);
+    mlc.set_mbc_drive_mid(params.mbc_drive_mid);
+    mlc.set_mbc_drive_hi(params.mbc_drive_hi);
+    mlc.set_adaa_order(params.adaa_order);
 }
 
 pub struct BaseIO {
@@ -928,6 +959,21 @@ impl Plugin for BaseIO {
             h2: self.params.mlc_h2.smoothed.next(),
             h3: self.params.mlc_h3.smoothed.next(),
             h4: self.params.mlc_h4.smoothed.next(),
+            ts_model: self.params.mlc_ts_model.value().as_f32(),
+            tube_model: self.params.mlc_tube_model.value().as_f32(),
+            tube_drive: self.params.mlc_tube_drive.smoothed.next(),
+            tube_bypass: self.params.mlc_tube_bypass.value(),
+            nfb_presence: self.params.mlc_nfb_presence.smoothed.next(),
+            nfb_resonance: self.params.mlc_nfb_resonance.smoothed.next(),
+            nfb_depth: self.params.mlc_nfb_depth.smoothed.next(),
+            nfb_bypass: self.params.mlc_nfb_bypass.value(),
+            mbc_bypass: self.params.mlc_mbc_bypass.value(),
+            mbc_cf_lo: self.params.mlc_mbc_cf_lo.smoothed.next(),
+            mbc_cf_hi: self.params.mlc_mbc_cf_hi.smoothed.next(),
+            mbc_drive_lo: self.params.mlc_mbc_drive_lo.smoothed.next(),
+            mbc_drive_mid: self.params.mlc_mbc_drive_mid.smoothed.next(),
+            mbc_drive_hi: self.params.mlc_mbc_drive_hi.smoothed.next(),
+            adaa_order: self.params.mlc_adaa_order.value().as_f32(),
         };
         let eq_active = self.params.eq_active.value();
         let eq_tanh_bypass = self.params.eq_tanh_bypass.value();

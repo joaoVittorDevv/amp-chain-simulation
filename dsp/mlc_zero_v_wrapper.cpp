@@ -132,4 +132,22 @@ void mlc_zero_v_set_preshape(FaustHandle handle, float value) { MLC_SET_PARAM("P
 void mlc_zero_v_set_preshape_tight(FaustHandle handle, float value) { MLC_SET_PARAM("Pre-Shape Tight", value); }
 void mlc_zero_v_set_preshape_bite(FaustHandle handle, float value) { MLC_SET_PARAM("Pre-Shape Bite", value); }
 
+// Tier 2.2 / 3.x additions. Labels match the Faust hslider/nentry/checkbox names
+// (Faust strips the [unit:dB] metadata from the label used as the map key).
+void mlc_zero_v_set_ts_model(FaustHandle handle, float value) { MLC_SET_PARAM("Tone Stack Model", value); }
+void mlc_zero_v_set_tube_model(FaustHandle handle, float value) { MLC_SET_PARAM("Tube Model", value); }
+void mlc_zero_v_set_tube_drive(FaustHandle handle, float value) { MLC_SET_PARAM("Tube Drive", value); }
+void mlc_zero_v_set_tube_bypass(FaustHandle handle, float value) { MLC_SET_PARAM("Tube Bypass", value); }
+void mlc_zero_v_set_nfb_presence(FaustHandle handle, float value) { MLC_SET_PARAM("NFB Presence", value); }
+void mlc_zero_v_set_nfb_resonance(FaustHandle handle, float value) { MLC_SET_PARAM("NFB Resonance", value); }
+void mlc_zero_v_set_nfb_depth(FaustHandle handle, float value) { MLC_SET_PARAM("NFB Depth", value); }
+void mlc_zero_v_set_nfb_bypass(FaustHandle handle, float value) { MLC_SET_PARAM("NFB Bypass", value); }
+void mlc_zero_v_set_mbc_bypass(FaustHandle handle, float value) { MLC_SET_PARAM("Multi-Band Bypass", value); }
+void mlc_zero_v_set_mbc_cf_lo(FaustHandle handle, float value) { MLC_SET_PARAM("XOver Low", value); }
+void mlc_zero_v_set_mbc_cf_hi(FaustHandle handle, float value) { MLC_SET_PARAM("XOver High", value); }
+void mlc_zero_v_set_mbc_drive_lo(FaustHandle handle, float value) { MLC_SET_PARAM("Drive Lo", value); }
+void mlc_zero_v_set_mbc_drive_mid(FaustHandle handle, float value) { MLC_SET_PARAM("Drive Mid", value); }
+void mlc_zero_v_set_mbc_drive_hi(FaustHandle handle, float value) { MLC_SET_PARAM("Drive Hi", value); }
+void mlc_zero_v_set_adaa_order(FaustHandle handle, float value) { MLC_SET_PARAM("ADAA Order", value); }
+
 }

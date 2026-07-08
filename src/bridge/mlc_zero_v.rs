@@ -12,7 +12,7 @@ use crate::lab::{DspVariant, ParameterMeta};
 #[cfg(feature = "lab")]
 pub const MLC_ZERO_V_IMPL_ID: &str = "mlc-zero-v";
 #[cfg(feature = "lab")]
-pub const MLC_ZERO_V_PARAM_IDS: [&str; 27] = [
+pub const MLC_ZERO_V_PARAM_IDS: [&str; 42] = [
     "mlc_gain",
     "mlc_master",
     "mlc_bass",
@@ -40,6 +40,21 @@ pub const MLC_ZERO_V_PARAM_IDS: [&str; 27] = [
     "mlc_h2",
     "mlc_h3",
     "mlc_h4",
+    "mlc_ts_model",
+    "mlc_tube_model",
+    "mlc_tube_drive",
+    "mlc_tube_bypass",
+    "mlc_nfb_presence",
+    "mlc_nfb_resonance",
+    "mlc_nfb_depth",
+    "mlc_nfb_bypass",
+    "mlc_mbc_bypass",
+    "mlc_mbc_cf_lo",
+    "mlc_mbc_cf_hi",
+    "mlc_mbc_drive_lo",
+    "mlc_mbc_drive_mid",
+    "mlc_mbc_drive_hi",
+    "mlc_adaa_order",
 ];
 
 pub struct MlcZeroVProcessor {
@@ -72,6 +87,22 @@ pub struct MlcZeroVProcessor {
     h2: f32,
     h3: f32,
     h4: f32,
+    // Tier 2.2 / 3.x additions.
+    ts_model: f32,
+    tube_model: f32,
+    tube_drive: f32,
+    tube_bypass: f32,
+    nfb_presence: f32,
+    nfb_resonance: f32,
+    nfb_depth: f32,
+    nfb_bypass: f32,
+    mbc_bypass: f32,
+    mbc_cf_lo: f32,
+    mbc_cf_hi: f32,
+    mbc_drive_lo: f32,
+    mbc_drive_mid: f32,
+    mbc_drive_hi: f32,
+    adaa_order: f32,
 }
 
 impl MlcZeroVProcessor {
@@ -110,6 +141,23 @@ impl MlcZeroVProcessor {
                 h2: 0.0,
                 h3: 0.7,
                 h4: 0.2,
+                // Neutral / bypassed defaults so the stock voicing is unchanged
+                // until the user opts in (bypass flags default to 1.0 = bypassed).
+                ts_model: 0.0,
+                tube_model: 0.0,
+                tube_drive: 0.0,
+                tube_bypass: 1.0,
+                nfb_presence: 0.0,
+                nfb_resonance: 0.0,
+                nfb_depth: 0.7,
+                nfb_bypass: 1.0,
+                mbc_bypass: 1.0,
+                mbc_cf_lo: 300.0,
+                mbc_cf_hi: 3000.0,
+                mbc_drive_lo: 1.0,
+                mbc_drive_mid: 1.0,
+                mbc_drive_hi: 1.0,
+                adaa_order: 0.0,
             })
         }
     }
@@ -223,6 +271,69 @@ impl MlcZeroVProcessor {
         self.h4 = value.clamp(0.0, 1.0);
     }
 
+    // --- Tier 2.2 / 3.x setters ---
+    #[inline(always)]
+    pub fn set_ts_model(&mut self, value: f32) {
+        self.ts_model = value.clamp(0.0, 24.0).round();
+    }
+    #[inline(always)]
+    pub fn set_tube_model(&mut self, value: f32) {
+        self.tube_model = value.clamp(0.0, 17.0).round();
+    }
+    #[inline(always)]
+    pub fn set_tube_drive(&mut self, value: f32) {
+        // Value is in dB; the Faust hslider converts to linear internally.
+        self.tube_drive = value.clamp(-20.0, 20.0);
+    }
+    #[inline(always)]
+    pub fn set_tube_bypass(&mut self, value: bool) {
+        self.tube_bypass = if value { 1.0 } else { 0.0 };
+    }
+    #[inline(always)]
+    pub fn set_nfb_presence(&mut self, value: f32) {
+        self.nfb_presence = value.clamp(0.0, 1.0);
+    }
+    #[inline(always)]
+    pub fn set_nfb_resonance(&mut self, value: f32) {
+        self.nfb_resonance = value.clamp(0.0, 1.0);
+    }
+    #[inline(always)]
+    pub fn set_nfb_depth(&mut self, value: f32) {
+        self.nfb_depth = value.clamp(0.0, 1.0);
+    }
+    #[inline(always)]
+    pub fn set_nfb_bypass(&mut self, value: bool) {
+        self.nfb_bypass = if value { 1.0 } else { 0.0 };
+    }
+    #[inline(always)]
+    pub fn set_mbc_bypass(&mut self, value: bool) {
+        self.mbc_bypass = if value { 1.0 } else { 0.0 };
+    }
+    #[inline(always)]
+    pub fn set_mbc_cf_lo(&mut self, value: f32) {
+        self.mbc_cf_lo = value.clamp(100.0, 800.0);
+    }
+    #[inline(always)]
+    pub fn set_mbc_cf_hi(&mut self, value: f32) {
+        self.mbc_cf_hi = value.clamp(1500.0, 6000.0);
+    }
+    #[inline(always)]
+    pub fn set_mbc_drive_lo(&mut self, value: f32) {
+        self.mbc_drive_lo = value.clamp(0.1, 4.0);
+    }
+    #[inline(always)]
+    pub fn set_mbc_drive_mid(&mut self, value: f32) {
+        self.mbc_drive_mid = value.clamp(0.1, 4.0);
+    }
+    #[inline(always)]
+    pub fn set_mbc_drive_hi(&mut self, value: f32) {
+        self.mbc_drive_hi = value.clamp(0.1, 4.0);
+    }
+    #[inline(always)]
+    pub fn set_adaa_order(&mut self, value: f32) {
+        self.adaa_order = value.clamp(0.0, 2.0).round();
+    }
+
     /// Push all cached parameter values into the Faust DSP instance.
     #[inline]
     fn push_params(&mut self) {
@@ -254,6 +365,21 @@ impl MlcZeroVProcessor {
             mlc_zero_v_set_h2(self.handle, self.h2);
             mlc_zero_v_set_h3(self.handle, self.h3);
             mlc_zero_v_set_h4(self.handle, self.h4);
+            mlc_zero_v_set_ts_model(self.handle, self.ts_model);
+            mlc_zero_v_set_tube_model(self.handle, self.tube_model);
+            mlc_zero_v_set_tube_drive(self.handle, self.tube_drive);
+            mlc_zero_v_set_tube_bypass(self.handle, self.tube_bypass);
+            mlc_zero_v_set_nfb_presence(self.handle, self.nfb_presence);
+            mlc_zero_v_set_nfb_resonance(self.handle, self.nfb_resonance);
+            mlc_zero_v_set_nfb_depth(self.handle, self.nfb_depth);
+            mlc_zero_v_set_nfb_bypass(self.handle, self.nfb_bypass);
+            mlc_zero_v_set_mbc_bypass(self.handle, self.mbc_bypass);
+            mlc_zero_v_set_mbc_cf_lo(self.handle, self.mbc_cf_lo);
+            mlc_zero_v_set_mbc_cf_hi(self.handle, self.mbc_cf_hi);
+            mlc_zero_v_set_mbc_drive_lo(self.handle, self.mbc_drive_lo);
+            mlc_zero_v_set_mbc_drive_mid(self.handle, self.mbc_drive_mid);
+            mlc_zero_v_set_mbc_drive_hi(self.handle, self.mbc_drive_hi);
+            mlc_zero_v_set_adaa_order(self.handle, self.adaa_order);
         }
     }
 }
@@ -317,6 +443,21 @@ impl ExternalProcessor for MlcZeroVProcessor {
             "mlc_h2" => Some(self.h2),
             "mlc_h3" => Some(self.h3),
             "mlc_h4" => Some(self.h4),
+            "mlc_ts_model" => Some(self.ts_model),
+            "mlc_tube_model" => Some(self.tube_model),
+            "mlc_tube_drive" => Some(self.tube_drive),
+            "mlc_tube_bypass" => Some(self.tube_bypass),
+            "mlc_nfb_presence" => Some(self.nfb_presence),
+            "mlc_nfb_resonance" => Some(self.nfb_resonance),
+            "mlc_nfb_depth" => Some(self.nfb_depth),
+            "mlc_nfb_bypass" => Some(self.nfb_bypass),
+            "mlc_mbc_bypass" => Some(self.mbc_bypass),
+            "mlc_mbc_cf_lo" => Some(self.mbc_cf_lo),
+            "mlc_mbc_cf_hi" => Some(self.mbc_cf_hi),
+            "mlc_mbc_drive_lo" => Some(self.mbc_drive_lo),
+            "mlc_mbc_drive_mid" => Some(self.mbc_drive_mid),
+            "mlc_mbc_drive_hi" => Some(self.mbc_drive_hi),
+            "mlc_adaa_order" => Some(self.adaa_order),
             _ => None,
         }
     }
@@ -350,6 +491,21 @@ impl ExternalProcessor for MlcZeroVProcessor {
             "mlc_h2" => self.set_h2(value),
             "mlc_h3" => self.set_h3(value),
             "mlc_h4" => self.set_h4(value),
+            "mlc_ts_model" => self.set_ts_model(value),
+            "mlc_tube_model" => self.set_tube_model(value),
+            "mlc_tube_drive" => self.set_tube_drive(value),
+            "mlc_tube_bypass" => self.set_tube_bypass(value >= 0.5),
+            "mlc_nfb_presence" => self.set_nfb_presence(value),
+            "mlc_nfb_resonance" => self.set_nfb_resonance(value),
+            "mlc_nfb_depth" => self.set_nfb_depth(value),
+            "mlc_nfb_bypass" => self.set_nfb_bypass(value >= 0.5),
+            "mlc_mbc_bypass" => self.set_mbc_bypass(value >= 0.5),
+            "mlc_mbc_cf_lo" => self.set_mbc_cf_lo(value),
+            "mlc_mbc_cf_hi" => self.set_mbc_cf_hi(value),
+            "mlc_mbc_drive_lo" => self.set_mbc_drive_lo(value),
+            "mlc_mbc_drive_mid" => self.set_mbc_drive_mid(value),
+            "mlc_mbc_drive_hi" => self.set_mbc_drive_hi(value),
+            "mlc_adaa_order" => self.set_adaa_order(value),
             _ => return false,
         }
         true
@@ -497,6 +653,57 @@ fn mlc_zero_v_param_metadata() -> Vec<ParameterMeta> {
         ("mlc_h2", "MLC Chebyshev H2", (0.0, 1.0), 0.0, None),
         ("mlc_h3", "MLC Chebyshev H3", (0.0, 1.0), 0.7, None),
         ("mlc_h4", "MLC Chebyshev H4", (0.0, 1.0), 0.2, None),
+        ("mlc_ts_model", "MLC Tone Stack Model", (0.0, 24.0), 0.0, None),
+        ("mlc_tube_model", "MLC Tube Model", (0.0, 17.0), 0.0, None),
+        (
+            "mlc_tube_drive",
+            "MLC Tube Drive",
+            (-20.0, 20.0),
+            0.0,
+            Some("dB"),
+        ),
+        ("mlc_tube_bypass", "MLC Tube Bypass", (0.0, 1.0), 1.0, None),
+        (
+            "mlc_nfb_presence",
+            "MLC NFB Presence",
+            (0.0, 1.0),
+            0.0,
+            None,
+        ),
+        (
+            "mlc_nfb_resonance",
+            "MLC NFB Resonance",
+            (0.0, 1.0),
+            0.0,
+            None,
+        ),
+        ("mlc_nfb_depth", "MLC NFB Depth", (0.0, 1.0), 0.7, None),
+        ("mlc_nfb_bypass", "MLC NFB Bypass", (0.0, 1.0), 1.0, None),
+        (
+            "mlc_mbc_bypass",
+            "MLC Multi-Band Bypass",
+            (0.0, 1.0),
+            1.0,
+            None,
+        ),
+        (
+            "mlc_mbc_cf_lo",
+            "MLC XOver Low",
+            (100.0, 800.0),
+            300.0,
+            Some("Hz"),
+        ),
+        (
+            "mlc_mbc_cf_hi",
+            "MLC XOver High",
+            (1500.0, 6000.0),
+            3000.0,
+            Some("Hz"),
+        ),
+        ("mlc_mbc_drive_lo", "MLC Drive Lo", (0.1, 4.0), 1.0, None),
+        ("mlc_mbc_drive_mid", "MLC Drive Mid", (0.1, 4.0), 1.0, None),
+        ("mlc_mbc_drive_hi", "MLC Drive Hi", (0.1, 4.0), 1.0, None),
+        ("mlc_adaa_order", "MLC ADAA Order", (0.0, 2.0), 0.0, None),
     ]
     .into_iter()
     .enumerate()

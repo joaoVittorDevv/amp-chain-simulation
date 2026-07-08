@@ -4,8 +4,10 @@ use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, Ext
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
 use distortion::core::state::plugin_params::{
-    AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos, MlcTab,
+    AmpModel, ClipType, MlcAdaaOrder, MlcBright, MlcFeedback, MlcGatePos, MlcTab, MlcTsModel,
+    MlcTubeModel,
 };
+use nih_plug::prelude::Enum;
 #[cfg(feature = "lab")]
 use distortion::core::ui::{draw_lab_panel, LabUiState};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
@@ -97,6 +99,22 @@ struct StandaloneState {
     mlc_preshape: bool,
     mlc_preshape_tight: f32,
     mlc_preshape_bite: f32,
+    // --- Tier 2.2 / 3.x additions ---
+    mlc_ts_model: MlcTsModel,
+    mlc_tube_model: MlcTubeModel,
+    mlc_tube_drive: f32,
+    mlc_tube_bypass: bool,
+    mlc_nfb_presence: f32,
+    mlc_nfb_resonance: f32,
+    mlc_nfb_depth: f32,
+    mlc_nfb_bypass: bool,
+    mlc_mbc_bypass: bool,
+    mlc_mbc_cf_lo: f32,
+    mlc_mbc_cf_hi: f32,
+    mlc_mbc_drive_lo: f32,
+    mlc_mbc_drive_mid: f32,
+    mlc_mbc_drive_hi: f32,
+    mlc_adaa_order: MlcAdaaOrder,
     eq_tanh_bypass: bool,
     gain: f32,
     bypass: bool,
@@ -156,6 +174,21 @@ impl Default for StandaloneState {
             mlc_preshape: false,
             mlc_preshape_tight: -3.0,
             mlc_preshape_bite: 3.0,
+            mlc_ts_model: MlcTsModel::Bassman,
+            mlc_tube_model: MlcTubeModel::Ax7T1,
+            mlc_tube_drive: 0.0,
+            mlc_tube_bypass: true,
+            mlc_nfb_presence: 0.0,
+            mlc_nfb_resonance: 0.0,
+            mlc_nfb_depth: 0.7,
+            mlc_nfb_bypass: true,
+            mlc_mbc_bypass: true,
+            mlc_mbc_cf_lo: 300.0,
+            mlc_mbc_cf_hi: 3000.0,
+            mlc_mbc_drive_lo: 1.0,
+            mlc_mbc_drive_mid: 1.0,
+            mlc_mbc_drive_hi: 1.0,
+            mlc_adaa_order: MlcAdaaOrder::Off,
             eq_tanh_bypass: false,
             gain: 1.0,
             bypass: false,
@@ -164,7 +197,7 @@ impl Default for StandaloneState {
             cabinet_mix: 1.0,
             cab_active_hash: String::new(),
             limiter_enable: true,
-            limiter_ceiling: -1.0,
+            limiter_ceiling: -0.2,
             limiter_release: 50.0,
         }
     }
@@ -216,6 +249,21 @@ struct AudioSnapshot {
     mlc_preshape: bool,
     mlc_preshape_tight: f32,
     mlc_preshape_bite: f32,
+    mlc_ts_model: MlcTsModel,
+    mlc_tube_model: MlcTubeModel,
+    mlc_tube_drive: f32,
+    mlc_tube_bypass: bool,
+    mlc_nfb_presence: f32,
+    mlc_nfb_resonance: f32,
+    mlc_nfb_depth: f32,
+    mlc_nfb_bypass: bool,
+    mlc_mbc_bypass: bool,
+    mlc_mbc_cf_lo: f32,
+    mlc_mbc_cf_hi: f32,
+    mlc_mbc_drive_lo: f32,
+    mlc_mbc_drive_mid: f32,
+    mlc_mbc_drive_hi: f32,
+    mlc_adaa_order: MlcAdaaOrder,
     eq_tanh_bypass: bool,
     gain: f32,
     bypass: bool,
@@ -272,6 +320,21 @@ impl StandaloneState {
             mlc_preshape: self.mlc_preshape,
             mlc_preshape_tight: self.mlc_preshape_tight,
             mlc_preshape_bite: self.mlc_preshape_bite,
+            mlc_ts_model: self.mlc_ts_model,
+            mlc_tube_model: self.mlc_tube_model,
+            mlc_tube_drive: self.mlc_tube_drive,
+            mlc_tube_bypass: self.mlc_tube_bypass,
+            mlc_nfb_presence: self.mlc_nfb_presence,
+            mlc_nfb_resonance: self.mlc_nfb_resonance,
+            mlc_nfb_depth: self.mlc_nfb_depth,
+            mlc_nfb_bypass: self.mlc_nfb_bypass,
+            mlc_mbc_bypass: self.mlc_mbc_bypass,
+            mlc_mbc_cf_lo: self.mlc_mbc_cf_lo,
+            mlc_mbc_cf_hi: self.mlc_mbc_cf_hi,
+            mlc_mbc_drive_lo: self.mlc_mbc_drive_lo,
+            mlc_mbc_drive_mid: self.mlc_mbc_drive_mid,
+            mlc_mbc_drive_hi: self.mlc_mbc_drive_hi,
+            mlc_adaa_order: self.mlc_adaa_order,
             eq_tanh_bypass: self.eq_tanh_bypass,
             gain: self.gain,
             bypass: self.bypass,
@@ -333,6 +396,9 @@ fn process_standalone_amp(
             let tight = if snap.mlc_tight { 1.0 } else { 0.0 };
             let asymmetry_enable = if snap.mlc_asymmetry_enable { 1.0 } else { 0.0 };
             let preshape = if snap.mlc_preshape { 1.0 } else { 0.0 };
+            let ts_model = snap.mlc_ts_model.as_f32();
+            let tube_model = snap.mlc_tube_model.as_f32();
+            let adaa_order = snap.mlc_adaa_order.as_f32();
             if let Some(mlc) = mlc_l {
                 mlc.set_gain(snap.mlc_gain);
                 mlc.set_master(snap.mlc_master);
@@ -361,6 +427,21 @@ fn process_standalone_amp(
                 mlc.set_h2(snap.mlc_h2);
                 mlc.set_h3(snap.mlc_h3);
                 mlc.set_h4(snap.mlc_h4);
+                mlc.set_ts_model(ts_model);
+                mlc.set_tube_model(tube_model);
+                mlc.set_tube_drive(snap.mlc_tube_drive);
+                mlc.set_tube_bypass(snap.mlc_tube_bypass);
+                mlc.set_nfb_presence(snap.mlc_nfb_presence);
+                mlc.set_nfb_resonance(snap.mlc_nfb_resonance);
+                mlc.set_nfb_depth(snap.mlc_nfb_depth);
+                mlc.set_nfb_bypass(snap.mlc_nfb_bypass);
+                mlc.set_mbc_bypass(snap.mlc_mbc_bypass);
+                mlc.set_mbc_cf_lo(snap.mlc_mbc_cf_lo);
+                mlc.set_mbc_cf_hi(snap.mlc_mbc_cf_hi);
+                mlc.set_mbc_drive_lo(snap.mlc_mbc_drive_lo);
+                mlc.set_mbc_drive_mid(snap.mlc_mbc_drive_mid);
+                mlc.set_mbc_drive_hi(snap.mlc_mbc_drive_hi);
+                mlc.set_adaa_order(adaa_order);
                 mlc.process_block(buf_l.as_mut_ptr(), buf_l.len());
             }
             if let Some(mlc) = mlc_r {
@@ -391,6 +472,21 @@ fn process_standalone_amp(
                 mlc.set_h2(snap.mlc_h2);
                 mlc.set_h3(snap.mlc_h3);
                 mlc.set_h4(snap.mlc_h4);
+                mlc.set_ts_model(ts_model);
+                mlc.set_tube_model(tube_model);
+                mlc.set_tube_drive(snap.mlc_tube_drive);
+                mlc.set_tube_bypass(snap.mlc_tube_bypass);
+                mlc.set_nfb_presence(snap.mlc_nfb_presence);
+                mlc.set_nfb_resonance(snap.mlc_nfb_resonance);
+                mlc.set_nfb_depth(snap.mlc_nfb_depth);
+                mlc.set_nfb_bypass(snap.mlc_nfb_bypass);
+                mlc.set_mbc_bypass(snap.mlc_mbc_bypass);
+                mlc.set_mbc_cf_lo(snap.mlc_mbc_cf_lo);
+                mlc.set_mbc_cf_hi(snap.mlc_mbc_cf_hi);
+                mlc.set_mbc_drive_lo(snap.mlc_mbc_drive_lo);
+                mlc.set_mbc_drive_mid(snap.mlc_mbc_drive_mid);
+                mlc.set_mbc_drive_hi(snap.mlc_mbc_drive_hi);
+                mlc.set_adaa_order(adaa_order);
                 mlc.process_block(buf_r.as_mut_ptr(), buf_r.len());
             }
         }
@@ -1794,6 +1890,15 @@ impl eframe::App for StandaloneApp {
         let mut ui_mlc_h2 = snap_ui.mlc_h2;
         let mut ui_mlc_h3 = snap_ui.mlc_h3;
         let mut ui_mlc_h4 = snap_ui.mlc_h4;
+        let mut ui_mlc_tube_drive = snap_ui.mlc_tube_drive;
+        let mut ui_mlc_nfb_presence = snap_ui.mlc_nfb_presence;
+        let mut ui_mlc_nfb_resonance = snap_ui.mlc_nfb_resonance;
+        let mut ui_mlc_nfb_depth = snap_ui.mlc_nfb_depth;
+        let mut ui_mlc_mbc_cf_lo = snap_ui.mlc_mbc_cf_lo;
+        let mut ui_mlc_mbc_cf_hi = snap_ui.mlc_mbc_cf_hi;
+        let mut ui_mlc_mbc_drive_lo = snap_ui.mlc_mbc_drive_lo;
+        let mut ui_mlc_mbc_drive_mid = snap_ui.mlc_mbc_drive_mid;
+        let mut ui_mlc_mbc_drive_hi = snap_ui.mlc_mbc_drive_hi;
         let mut ui_limiter_enable = snap_ui.limiter_enable;
         let mut ui_limiter_ceiling = snap_ui.limiter_ceiling;
         let mut ui_limiter_release = snap_ui.limiter_release;
@@ -2171,6 +2276,7 @@ impl eframe::App for StandaloneApp {
                     ui.selectable_value(&mut ui_mlc_tab, MlcTab::Tone, "Tone");
                     ui.selectable_value(&mut ui_mlc_tab, MlcTab::GainClip, "Gain/Clip");
                     ui.selectable_value(&mut ui_mlc_tab, MlcTab::Harmonics, "Harmonics");
+                    ui.selectable_value(&mut ui_mlc_tab, MlcTab::PowerAmp, "Power Amp");
                     ui.selectable_value(&mut ui_mlc_tab, MlcTab::Limiter, "Limiter");
                 });
                 ui.separator();
@@ -2707,6 +2813,238 @@ impl eframe::App for StandaloneApp {
                             });
                         });
                     }
+                    // --- Tier 2.2 / 3.x controls ---
+                    // Compact knob helper (value passed by ref, `changed` flag by ref).
+                    let add_knob =
+                        |ui: &mut egui::Ui,
+                         label: &str,
+                         val: &mut f32,
+                         lo: f32,
+                         hi: f32,
+                         unit: &str,
+                         ch: &mut bool| {
+                            ui.vertical(|ui| {
+                                ui.label(label);
+                                if ui
+                                    .add(
+                                        Knob::new(val, lo, hi, KnobStyle::Wiper).with_size(45.0),
+                                    )
+                                    .changed()
+                                {
+                                    *ch = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.1}{}", *val, unit))
+                                        .small()
+                                        .monospace(),
+                                );
+                            });
+                        };
+
+                    if ui_mlc_tab == MlcTab::Tone {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Tone Stack").strong());
+                            let mut ts_model = snap_ui.mlc_ts_model;
+                            let names = MlcTsModel::variants();
+                            egui::ComboBox::from_id_salt("standalone_mlc_ts_model")
+                                .width(150.0)
+                                .selected_text(
+                                    names.get(ts_model.to_index()).copied().unwrap_or(""),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in names.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut ts_model,
+                                            MlcTsModel::from_index(i),
+                                            *name,
+                                        );
+                                    }
+                                });
+                            if ts_model != snap_ui.mlc_ts_model {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_ts_model = ts_model;
+                                }
+                            }
+                        });
+                    }
+
+                    if ui_mlc_tab == MlcTab::GainClip {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Tube").strong());
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label("Model");
+                                    let mut tube_model = snap_ui.mlc_tube_model;
+                                    let names = MlcTubeModel::variants();
+                                    egui::ComboBox::from_id_salt("standalone_mlc_tube_model")
+                                        .width(110.0)
+                                        .selected_text(
+                                            names
+                                                .get(tube_model.to_index())
+                                                .copied()
+                                                .unwrap_or(""),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for (i, name) in names.iter().enumerate() {
+                                                ui.selectable_value(
+                                                    &mut tube_model,
+                                                    MlcTubeModel::from_index(i),
+                                                    *name,
+                                                );
+                                            }
+                                        });
+                                    let mut tube_bypass = snap_ui.mlc_tube_bypass;
+                                    if ui.checkbox(&mut tube_bypass, "Bypass").changed() {
+                                        changed = true;
+                                        if let Ok(mut st) = self.standalone_state.lock() {
+                                            st.mlc_tube_bypass = tube_bypass;
+                                        }
+                                    }
+                                    if tube_model != snap_ui.mlc_tube_model {
+                                        changed = true;
+                                        if let Ok(mut st) = self.standalone_state.lock() {
+                                            st.mlc_tube_model = tube_model;
+                                        }
+                                    }
+                                });
+                                add_knob(
+                                    ui,
+                                    "Drive",
+                                    &mut ui_mlc_tube_drive,
+                                    -20.0,
+                                    20.0,
+                                    " dB",
+                                    &mut changed,
+                                );
+                            });
+                        });
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Multi-Band Clip").strong());
+                            let mut mbc_bypass = snap_ui.mlc_mbc_bypass;
+                            if ui.checkbox(&mut mbc_bypass, "Bypass").changed() {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_mbc_bypass = mbc_bypass;
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                add_knob(
+                                    ui,
+                                    "XOver Lo",
+                                    &mut ui_mlc_mbc_cf_lo,
+                                    100.0,
+                                    800.0,
+                                    " Hz",
+                                    &mut changed,
+                                );
+                                add_knob(
+                                    ui,
+                                    "XOver Hi",
+                                    &mut ui_mlc_mbc_cf_hi,
+                                    1500.0,
+                                    6000.0,
+                                    " Hz",
+                                    &mut changed,
+                                );
+                                add_knob(
+                                    ui,
+                                    "Drv Lo",
+                                    &mut ui_mlc_mbc_drive_lo,
+                                    0.1,
+                                    4.0,
+                                    "",
+                                    &mut changed,
+                                );
+                                add_knob(
+                                    ui,
+                                    "Drv Mid",
+                                    &mut ui_mlc_mbc_drive_mid,
+                                    0.1,
+                                    4.0,
+                                    "",
+                                    &mut changed,
+                                );
+                                add_knob(
+                                    ui,
+                                    "Drv Hi",
+                                    &mut ui_mlc_mbc_drive_hi,
+                                    0.1,
+                                    4.0,
+                                    "",
+                                    &mut changed,
+                                );
+                            });
+                        });
+                    }
+
+                    if ui_mlc_tab == MlcTab::Harmonics {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Quality (ADAA)").strong());
+                            let mut adaa = snap_ui.mlc_adaa_order;
+                            let names = MlcAdaaOrder::variants();
+                            egui::ComboBox::from_id_salt("standalone_mlc_adaa_order")
+                                .width(90.0)
+                                .selected_text(names.get(adaa.to_index()).copied().unwrap_or(""))
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in names.iter().enumerate() {
+                                        ui.selectable_value(
+                                            &mut adaa,
+                                            MlcAdaaOrder::from_index(i),
+                                            *name,
+                                        );
+                                    }
+                                });
+                            if adaa != snap_ui.mlc_adaa_order {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_adaa_order = adaa;
+                                }
+                            }
+                        });
+                    }
+
+                    if ui_mlc_tab == MlcTab::PowerAmp {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("NFB Loop").strong());
+                            let mut nfb_bypass = snap_ui.mlc_nfb_bypass;
+                            if ui.checkbox(&mut nfb_bypass, "Bypass").changed() {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_nfb_bypass = nfb_bypass;
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                add_knob(
+                                    ui,
+                                    "Presence",
+                                    &mut ui_mlc_nfb_presence,
+                                    0.0,
+                                    1.0,
+                                    "",
+                                    &mut changed,
+                                );
+                                add_knob(
+                                    ui,
+                                    "Resonance",
+                                    &mut ui_mlc_nfb_resonance,
+                                    0.0,
+                                    1.0,
+                                    "",
+                                    &mut changed,
+                                );
+                                add_knob(
+                                    ui,
+                                    "Depth",
+                                    &mut ui_mlc_nfb_depth,
+                                    0.0,
+                                    1.0,
+                                    "",
+                                    &mut changed,
+                                );
+                            });
+                        });
+                    }
                 });
                 if changed {
                     if let Ok(mut st) = self.standalone_state.lock() {
@@ -2726,6 +3064,15 @@ impl eframe::App for StandaloneApp {
                         st.mlc_h2 = ui_mlc_h2;
                         st.mlc_h3 = ui_mlc_h3;
                         st.mlc_h4 = ui_mlc_h4;
+                        st.mlc_tube_drive = ui_mlc_tube_drive;
+                        st.mlc_nfb_presence = ui_mlc_nfb_presence;
+                        st.mlc_nfb_resonance = ui_mlc_nfb_resonance;
+                        st.mlc_nfb_depth = ui_mlc_nfb_depth;
+                        st.mlc_mbc_cf_lo = ui_mlc_mbc_cf_lo;
+                        st.mlc_mbc_cf_hi = ui_mlc_mbc_cf_hi;
+                        st.mlc_mbc_drive_lo = ui_mlc_mbc_drive_lo;
+                        st.mlc_mbc_drive_mid = ui_mlc_mbc_drive_mid;
+                        st.mlc_mbc_drive_hi = ui_mlc_mbc_drive_hi;
                         st.limiter_enable = ui_limiter_enable;
                         st.limiter_ceiling = ui_limiter_ceiling;
                         st.limiter_release = ui_limiter_release;

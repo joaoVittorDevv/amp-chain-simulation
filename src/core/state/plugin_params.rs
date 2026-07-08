@@ -54,6 +54,7 @@ pub enum MlcTab {
     Tone,
     GainClip,
     Harmonics,
+    PowerAmp,
     Limiter,
 }
 
@@ -116,6 +117,139 @@ impl ClipType {
                 "Chebyshev — Gerador explícito de harmônicos (H2/H3/H4). Brilho e mordida controláveis."
             }
         }
+    }
+}
+
+/// Real passive tone-stack circuit model (Tier 2.2). Declaration order MUST match
+/// the `select_ts` dispatch order (index 0..24) in `dsp/mlc_zero_v.dsp`.
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug, Default)]
+pub enum MlcTsModel {
+    #[default]
+    #[name = "Bassman"]
+    Bassman,
+    #[name = "Mesa"]
+    Mesa,
+    #[name = "Twin"]
+    Twin,
+    #[name = "Princeton"]
+    Princeton,
+    #[name = "Fender Blues"]
+    FenderBlues,
+    #[name = "Fender Default"]
+    FenderDefault,
+    #[name = "Fender Deville"]
+    FenderDeville,
+    #[name = "JCM800"]
+    Jcm800,
+    #[name = "JCM2000"]
+    Jcm2000,
+    #[name = "JTM45"]
+    Jtm45,
+    #[name = "M Lead"]
+    Mlead,
+    #[name = "M2199"]
+    M2199,
+    #[name = "AC30"]
+    Ac30,
+    #[name = "AC15"]
+    Ac15,
+    #[name = "Soldano"]
+    Soldano,
+    #[name = "Sovtek"]
+    Sovtek,
+    #[name = "Peavey"]
+    Peavey,
+    #[name = "Ibanez"]
+    Ibanez,
+    #[name = "Roland"]
+    Roland,
+    #[name = "Ampeg"]
+    Ampeg,
+    #[name = "Ampeg Rev"]
+    AmpegRev,
+    #[name = "Bogner"]
+    Bogner,
+    #[name = "Groove"]
+    Groove,
+    #[name = "Crunch"]
+    Crunch,
+    #[name = "Gibsen"]
+    Gibsen,
+}
+
+impl MlcTsModel {
+    /// DSP selector index (0-24) passed to the Faust `Tone Stack Model` param.
+    pub fn as_f32(self) -> f32 {
+        self as u32 as f32
+    }
+}
+
+/// LUT tube waveshaping model (Tier 3.2): 6 tube types × 3 stages (18 total).
+/// Declaration order MUST match the `tube_stage` dispatch (index 0..17).
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug, Default)]
+pub enum MlcTubeModel {
+    #[default]
+    #[name = "12AX7 T1"]
+    Ax7T1,
+    #[name = "12AX7 T2"]
+    Ax7T2,
+    #[name = "12AX7 T3"]
+    Ax7T3,
+    #[name = "12AT7 T1"]
+    At7T1,
+    #[name = "12AT7 T2"]
+    At7T2,
+    #[name = "12AT7 T3"]
+    At7T3,
+    #[name = "12AU7 T1"]
+    Au7T1,
+    #[name = "12AU7 T2"]
+    Au7T2,
+    #[name = "12AU7 T3"]
+    Au7T3,
+    #[name = "6V6 T1"]
+    V6T1,
+    #[name = "6V6 T2"]
+    V6T2,
+    #[name = "6V6 T3"]
+    V6T3,
+    #[name = "6DJ8 T1"]
+    Dj8T1,
+    #[name = "6DJ8 T2"]
+    Dj8T2,
+    #[name = "6DJ8 T3"]
+    Dj8T3,
+    #[name = "6C16 T1"]
+    C16T1,
+    #[name = "6C16 T2"]
+    C16T2,
+    #[name = "6C16 T3"]
+    C16T3,
+}
+
+impl MlcTubeModel {
+    /// DSP selector index (0-17) passed to the Faust `Tube Model` param.
+    pub fn as_f32(self) -> f32 {
+        self as u32 as f32
+    }
+}
+
+/// ADAA anti-aliasing order (Tier 3.6). 0 = Off, 1 = ADAA1, 2 = ADAA2.
+#[derive(Enum, PartialEq, Eq, Clone, Copy, Debug, Default)]
+pub enum MlcAdaaOrder {
+    #[default]
+    #[name = "Off"]
+    Off,
+    #[name = "ADAA1"]
+    Adaa1,
+    #[name = "ADAA2"]
+    Adaa2,
+}
+
+impl MlcAdaaOrder {
+    /// DSP selector index (0-2) passed to the Faust `ADAA Order` param.
+    pub fn as_f32(self) -> f32 {
+        self as u32 as f32
     }
 }
 
@@ -230,6 +364,56 @@ pub struct BaseIOParams {
 
     #[id = "mlc_preshape_bite"]
     pub mlc_preshape_bite: FloatParam,
+
+    // --- Tier 2.2  Tone Stack model ---
+    #[id = "mlc_ts_model"]
+    pub mlc_ts_model: EnumParam<MlcTsModel>,
+
+    // --- Tier 3.2  Tube waveshaping ---
+    #[id = "mlc_tube_model"]
+    pub mlc_tube_model: EnumParam<MlcTubeModel>,
+
+    #[id = "mlc_tube_drive"]
+    pub mlc_tube_drive: FloatParam,
+
+    #[id = "mlc_tube_bypass"]
+    pub mlc_tube_bypass: BoolParam,
+
+    // --- Tier 3.4  Power-amp NFB loop ---
+    #[id = "mlc_nfb_presence"]
+    pub mlc_nfb_presence: FloatParam,
+
+    #[id = "mlc_nfb_resonance"]
+    pub mlc_nfb_resonance: FloatParam,
+
+    #[id = "mlc_nfb_depth"]
+    pub mlc_nfb_depth: FloatParam,
+
+    #[id = "mlc_nfb_bypass"]
+    pub mlc_nfb_bypass: BoolParam,
+
+    // --- Tier 3.5  Multi-band clipping ---
+    #[id = "mlc_mbc_bypass"]
+    pub mlc_mbc_bypass: BoolParam,
+
+    #[id = "mlc_mbc_cf_lo"]
+    pub mlc_mbc_cf_lo: FloatParam,
+
+    #[id = "mlc_mbc_cf_hi"]
+    pub mlc_mbc_cf_hi: FloatParam,
+
+    #[id = "mlc_mbc_drive_lo"]
+    pub mlc_mbc_drive_lo: FloatParam,
+
+    #[id = "mlc_mbc_drive_mid"]
+    pub mlc_mbc_drive_mid: FloatParam,
+
+    #[id = "mlc_mbc_drive_hi"]
+    pub mlc_mbc_drive_hi: FloatParam,
+
+    // --- Tier 3.6  ADAA anti-aliasing ---
+    #[id = "mlc_adaa_order"]
+    pub mlc_adaa_order: EnumParam<MlcAdaaOrder>,
 
     // --- Cabinet IR ---
     #[id = "cab_bypass"]
@@ -563,6 +747,94 @@ impl Default for BaseIOParams {
             .with_smoother(SmoothingStyle::Linear(50.0))
             .with_unit(" dB")
             .with_value_to_string(formatters::v2s_f32_rounded(1)),
+
+            // --- Tier 2.2 / 3.x defaults (neutral / bypassed) ---
+            mlc_ts_model: EnumParam::new("MLC Tone Stack", MlcTsModel::Bassman),
+            mlc_tube_model: EnumParam::new("MLC Tube Model", MlcTubeModel::Ax7T1),
+            mlc_tube_drive: FloatParam::new(
+                "MLC Tube Drive",
+                0.0,
+                FloatRange::Linear {
+                    min: -20.0,
+                    max: 20.0,
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_unit(" dB")
+            .with_value_to_string(formatters::v2s_f32_rounded(1)),
+            mlc_tube_bypass: BoolParam::new("MLC Tube Bypass", true),
+
+            mlc_nfb_presence: FloatParam::new(
+                "MLC NFB Presence",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_nfb_resonance: FloatParam::new(
+                "MLC NFB Resonance",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_nfb_depth: FloatParam::new(
+                "MLC NFB Depth",
+                0.7,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_nfb_bypass: BoolParam::new("MLC NFB Bypass", true),
+
+            mlc_mbc_bypass: BoolParam::new("MLC Multi-Band Bypass", true),
+            mlc_mbc_cf_lo: FloatParam::new(
+                "MLC XOver Low",
+                300.0,
+                FloatRange::Skewed {
+                    min: 100.0,
+                    max: 800.0,
+                    factor: FloatRange::skew_factor(-1.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" Hz")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
+            mlc_mbc_cf_hi: FloatParam::new(
+                "MLC XOver High",
+                3000.0,
+                FloatRange::Skewed {
+                    min: 1500.0,
+                    max: 6000.0,
+                    factor: FloatRange::skew_factor(-1.0),
+                },
+            )
+            .with_smoother(SmoothingStyle::Logarithmic(50.0))
+            .with_unit(" Hz")
+            .with_value_to_string(formatters::v2s_f32_rounded(0)),
+            mlc_mbc_drive_lo: FloatParam::new(
+                "MLC Drive Lo",
+                1.0,
+                FloatRange::Linear { min: 0.1, max: 4.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_mbc_drive_mid: FloatParam::new(
+                "MLC Drive Mid",
+                1.0,
+                FloatRange::Linear { min: 0.1, max: 4.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_mbc_drive_hi: FloatParam::new(
+                "MLC Drive Hi",
+                1.0,
+                FloatRange::Linear { min: 0.1, max: 4.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+
+            mlc_adaa_order: EnumParam::new("MLC ADAA Order", MlcAdaaOrder::Off),
 
             // --- Cabinet IR defaults ---
             cabinet_bypass: BoolParam::new("Cabinet Bypass", false),

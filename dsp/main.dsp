@@ -1,9 +1,9 @@
 import("stdfaust.lib");
 diff = library("diff.lib");
-filters = library("filters.lib");
+filters = library("svf.lib");
 
 // --- Equalizador Paramétrico de 3 Bandas Estável ---
-// Utilizamos SVF (State Variable Filter) da biblioteca faust-ddsp/filters.lib
+// Utilizamos SVF (State Variable Filter) da biblioteca faust-ddsp/svf.lib
 
 // Banda 1 (Low Shelf)
 f1 = hslider("EQ Low Freq [unit:Hz]", 100, 20, 1000, 1) : si.smoo;
