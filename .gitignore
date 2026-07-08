@@ -49,7 +49,6 @@ Desktop.ini
 /logs/
 /renders/
 /exports/
-/docs/
 # Any files containing secrets
 .env*
 ! .env.example
