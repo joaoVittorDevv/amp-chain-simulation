@@ -1,7 +1,6 @@
 pub mod faust;
 pub mod mlc_zero_v;
 pub mod mojo;
-pub mod oversampling;
 
 use crate::lab::ParameterMeta;
 

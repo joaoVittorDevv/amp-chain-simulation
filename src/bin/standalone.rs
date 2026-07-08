@@ -4,7 +4,7 @@ use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, Ext
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
 use distortion::core::state::plugin_params::{
-    ovs_factor_label, AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos,
+    AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos,
 };
 #[cfg(feature = "lab")]
 use distortion::core::ui::{draw_lab_panel, LabUiState};
@@ -86,7 +86,6 @@ struct StandaloneState {
     mlc_clip_type1: ClipType,
     mlc_clip_type2: ClipType,
     mlc_clip_type3: ClipType,
-    mlc_ovs_factor: i32,
     mlc_clean_blend: f32,
     mlc_sag: f32,
     mlc_h2: f32,
@@ -146,7 +145,6 @@ impl Default for StandaloneState {
             mlc_clip_type1: ClipType::AsymmetricTanh,
             mlc_clip_type2: ClipType::AsymmetricTanh,
             mlc_clip_type3: ClipType::Exponential,
-            mlc_ovs_factor: 0,
             mlc_clean_blend: 0.0,
             mlc_sag: 0.0,
             mlc_h2: 0.0,
@@ -207,7 +205,6 @@ struct AudioSnapshot {
     mlc_clip_type1: ClipType,
     mlc_clip_type2: ClipType,
     mlc_clip_type3: ClipType,
-    mlc_ovs_factor: i32,
     mlc_clean_blend: f32,
     mlc_sag: f32,
     mlc_h2: f32,
@@ -264,7 +261,6 @@ impl StandaloneState {
             mlc_clip_type1: self.mlc_clip_type1,
             mlc_clip_type2: self.mlc_clip_type2,
             mlc_clip_type3: self.mlc_clip_type3,
-            mlc_ovs_factor: self.mlc_ovs_factor,
             mlc_clean_blend: self.mlc_clean_blend,
             mlc_sag: self.mlc_sag,
             mlc_h2: self.mlc_h2,
@@ -365,7 +361,6 @@ fn process_standalone_amp(
                 mlc.set_h2(snap.mlc_h2);
                 mlc.set_h3(snap.mlc_h3);
                 mlc.set_h4(snap.mlc_h4);
-                mlc.set_ovs_factor(snap.mlc_ovs_factor);
                 mlc.process_block(buf_l.as_mut_ptr(), buf_l.len());
             }
             if let Some(mlc) = mlc_r {
@@ -396,7 +391,6 @@ fn process_standalone_amp(
                 mlc.set_h2(snap.mlc_h2);
                 mlc.set_h3(snap.mlc_h3);
                 mlc.set_h4(snap.mlc_h4);
-                mlc.set_ovs_factor(snap.mlc_ovs_factor);
                 mlc.process_block(buf_r.as_mut_ptr(), buf_r.len());
             }
         }
@@ -2237,24 +2231,6 @@ impl eframe::App for StandaloneApp {
                                                 _ => st.mlc_clip_type3 = clip_type,
                                             }
                                         }
-                                    }
-                                }
-                            });
-                            ui.vertical(|ui| {
-                                ui.label("Oversampling");
-                                let mut ovs = snap_ui.mlc_ovs_factor;
-                                egui::ComboBox::from_id_salt("standalone_mlc_ovs")
-                                    .width(70.0)
-                                    .selected_text(ovs_factor_label(ovs))
-                                    .show_ui(ui, |ui| {
-                                        for v in 0..=2 {
-                                            ui.selectable_value(&mut ovs, v, ovs_factor_label(v));
-                                        }
-                                    });
-                                if ovs != snap_ui.mlc_ovs_factor {
-                                    changed = true;
-                                    if let Ok(mut st) = self.standalone_state.lock() {
-                                        st.mlc_ovs_factor = ovs;
                                     }
                                 }
                             });

@@ -5,7 +5,6 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings_mlc_zero_v.rs"));
 
-use super::oversampling::Lanczos3Oversampler;
 use super::ExternalProcessor;
 #[cfg(feature = "lab")]
 use crate::lab::{DspVariant, ParameterMeta};
@@ -43,13 +42,6 @@ pub const MLC_ZERO_V_PARAM_IDS: [&str; 27] = [
     "mlc_h4",
 ];
 
-/// Maximum block size (at the base sample rate) the internal oversampler can
-/// handle. Larger blocks fall back to 1x processing to avoid reallocation on the
-/// audio thread.
-const OVS_MAX_BLOCK: usize = 8192;
-/// Maximum oversampling factor (2-log): 2 stages of 2x = up to 4x.
-const OVS_MAX_FACTOR: usize = 2;
-
 pub struct MlcZeroVProcessor {
     handle: FaustHandle,
     is_ready: bool,
@@ -80,21 +72,6 @@ pub struct MlcZeroVProcessor {
     h2: f32,
     h3: f32,
     h4: f32,
-
-    // --- Oversampling (Rust-side, wraps the Faust DSP) ---
-    /// Requested oversampling factor as a 2-log: 0 = 1x, 1 = 2x, 2 = 4x.
-    ovs_factor: usize,
-    /// The oversampling factor (2-log) the last `process_block` actually used.
-    /// This can differ from `ovs_factor` when a block larger than
-    /// `OVS_MAX_BLOCK` forces a fall back to 1x, so latency reporting to the
-    /// host reflects the audio path rather than the requested factor.
-    effective_ovs_factor: usize,
-    oversampler: Lanczos3Oversampler,
-    /// Base engine sample rate, cached from `init`.
-    base_sample_rate: f32,
-    /// The oversampling multiplier (1/2/4) the Faust DSP is currently initialized
-    /// for, so we only re-init its coefficients when the factor actually changes.
-    active_mult: usize,
 }
 
 impl MlcZeroVProcessor {
@@ -133,11 +110,6 @@ impl MlcZeroVProcessor {
                 h2: 0.0,
                 h3: 0.7,
                 h4: 0.2,
-                ovs_factor: 0,
-                effective_ovs_factor: 0,
-                oversampler: Lanczos3Oversampler::new(OVS_MAX_BLOCK, OVS_MAX_FACTOR),
-                base_sample_rate: 44100.0,
-                active_mult: 1,
             })
         }
     }
@@ -251,22 +223,6 @@ impl MlcZeroVProcessor {
         self.h4 = value.clamp(0.0, 1.0);
     }
 
-    /// Set the oversampling factor as a 2-log: 0 = 1x, 1 = 2x, 2 = 4x. Values are
-    /// clamped to the oversampler's maximum factor.
-    #[inline(always)]
-    pub fn set_ovs_factor(&mut self, value: i32) {
-        self.ovs_factor = (value.max(0) as usize).min(OVS_MAX_FACTOR);
-    }
-
-    /// Plugin delay compensation for the oversampling factor the audio path is
-    /// actually running, in samples at the base sample rate. This tracks the
-    /// *effective* factor (updated by `process_block`) rather than the requested
-    /// one, so PDC never over-reports when a large block forces a 1x fall back.
-    #[inline(always)]
-    pub fn latency_samples(&self) -> u32 {
-        self.oversampler.latency(self.effective_ovs_factor)
-    }
-
     /// Push all cached parameter values into the Faust DSP instance.
     #[inline]
     fn push_params(&mut self) {
@@ -316,9 +272,6 @@ unsafe impl Send for MlcZeroVProcessor {}
 
 impl ExternalProcessor for MlcZeroVProcessor {
     fn init(&mut self, sample_rate: f32) {
-        self.base_sample_rate = sample_rate;
-        self.active_mult = 1;
-        self.oversampler.reset();
         unsafe {
             mlc_zero_v_init(self.handle, sample_rate);
         }
@@ -329,40 +282,9 @@ impl ExternalProcessor for MlcZeroVProcessor {
         if !self.is_ready || buffer.is_null() || length == 0 {
             return;
         }
-
-        // Determine the oversampling factor we can actually honor for this block.
-        // Blocks larger than the oversampler's scratch space fall back to 1x so we
-        // never allocate on the audio thread.
-        let mut factor = self.ovs_factor.min(self.oversampler.max_factor());
-        if factor > 0 && length > self.oversampler.max_block_size() {
-            factor = 0;
-        }
-        // Record the factor the audio path is really using so `latency_samples`
-        // reports the truth to the host, even on the 1x large-block fall back.
-        self.effective_ovs_factor = factor;
-        let mult = 1usize << factor;
-
-        // The Faust DSP runs at the oversampled rate, so its filter coefficients
-        // must be recomputed whenever the effective sample rate changes.
-        if mult != self.active_mult {
-            unsafe {
-                mlc_zero_v_init(self.handle, self.base_sample_rate * mult as f32);
-            }
-            self.active_mult = mult;
-        }
-
         self.push_params();
-
-        let handle = self.handle;
-        if factor == 0 {
-            unsafe {
-                mlc_zero_v_process(handle, buffer, length as _);
-            }
-        } else {
-            let block = unsafe { std::slice::from_raw_parts_mut(buffer, length) };
-            self.oversampler.process(block, factor, |upsampled| unsafe {
-                mlc_zero_v_process(handle, upsampled.as_mut_ptr(), upsampled.len() as _);
-            });
+        unsafe {
+            mlc_zero_v_process(self.handle, buffer, length as _);
         }
     }
 
@@ -453,7 +375,7 @@ impl DspVariant for MlcZeroVProcessor {
     }
 
     fn latency(&self) -> usize {
-        self.latency_samples() as usize
+        0
     }
 
     fn get_param(&self, id: &str) -> Option<f32> {
@@ -644,36 +566,6 @@ mod tests {
         assert_eq!(processor.get_param("mlc_sag"), Some(1.0));
 
         assert_eq!(processor.get_param("missing"), None);
-    }
-
-    /// The bridge-level oversampling wrapper must report the *effective* latency
-    /// — the factor the audio path actually ran — which is only known after a
-    /// block has been processed.
-    #[test]
-    fn test_mlc_oversampling_latency_tracks_effective_factor() {
-        let mut processor = MlcZeroVProcessor::new().expect("mlc processor");
-        processor.init(44_100.0);
-
-        // Before any block is processed the effective factor is 1x.
-        assert_eq!(processor.latency_samples(), 0);
-
-        // A normal-sized block honours the requested 4x factor → 8 samples PDC.
-        processor.set_ovs_factor(2); // 4x
-        let mut block = vec![0.1f32; 512];
-        processor.process_block(block.as_mut_ptr(), block.len());
-        assert_eq!(processor.latency_samples(), 8);
-
-        // 2x reports 5 samples once a block has run at that factor.
-        processor.set_ovs_factor(1); // 2x
-        processor.process_block(block.as_mut_ptr(), block.len());
-        assert_eq!(processor.latency_samples(), 5);
-
-        // A block larger than OVS_MAX_BLOCK forces a 1x fall back, so the
-        // reported latency must drop to 0 to stay honest with the DAW's PDC.
-        processor.set_ovs_factor(2); // request 4x again
-        let mut big_block = vec![0.1f32; super::OVS_MAX_BLOCK + 808];
-        processor.process_block(big_block.as_mut_ptr(), big_block.len());
-        assert_eq!(processor.latency_samples(), 0);
     }
 
     /// With every stage set to Chebyshev and all harmonic amounts maxed, the raw

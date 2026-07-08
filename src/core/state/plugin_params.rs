@@ -102,15 +102,6 @@ impl ClipType {
     }
 }
 
-/// Map the `mlc_ovs_factor` IntParam value (0/1/2) to its display label.
-pub fn ovs_factor_label(value: i32) -> &'static str {
-    match value {
-        0 => "1x",
-        1 => "2x",
-        _ => "4x",
-    }
-}
-
 #[derive(Params)]
 pub struct BaseIOParams {
     #[persist = "editor-state"]
@@ -189,11 +180,6 @@ pub struct BaseIOParams {
 
     #[id = "mlc_clip_type3"]
     pub mlc_clip_type3: EnumParam<ClipType>,
-
-    /// Oversampling factor (0 = 1x, 1 = 2x, 2 = 4x). Handled Rust-side in the
-    /// bridge; adds plugin latency reported via PDC.
-    #[id = "mlc_ovs"]
-    pub mlc_ovs_factor: IntParam,
 
     #[id = "mlc_clean_blend"]
     pub mlc_clean_blend: FloatParam,
@@ -492,13 +478,6 @@ impl Default for BaseIOParams {
             mlc_clip_type1: EnumParam::new("MLC Clip Type 1", ClipType::AsymmetricTanh),
             mlc_clip_type2: EnumParam::new("MLC Clip Type 2", ClipType::AsymmetricTanh),
             mlc_clip_type3: EnumParam::new("MLC Clip Type 3", ClipType::Exponential),
-
-            mlc_ovs_factor: IntParam::new(
-                "MLC Oversampling",
-                0,
-                IntRange::Linear { min: 0, max: 2 },
-            )
-            .with_value_to_string(std::sync::Arc::new(|v| ovs_factor_label(v).to_string())),
 
             mlc_clean_blend: FloatParam::new(
                 "MLC Clean Blend",

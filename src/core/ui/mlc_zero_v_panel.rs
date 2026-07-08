@@ -197,25 +197,6 @@ fn clip_type_combo(
     }
 }
 
-/// Combo for the oversampling `IntParam` (0 = 1x, 1 = 2x, 2 = 4x).
-fn ovs_combo(ui: &mut egui::Ui, setter: &ParamSetter, param: &nih_plug::prelude::IntParam) {
-    use crate::core::state::plugin_params::ovs_factor_label;
-    let mut value = param.value();
-    egui::ComboBox::from_id_salt("mlc_ovs_combo")
-        .width(70.0)
-        .selected_text(ovs_factor_label(value))
-        .show_ui(ui, |ui| {
-            for v in 0..=2 {
-                ui.selectable_value(&mut value, v, ovs_factor_label(v));
-            }
-        });
-    if value != param.value() {
-        setter.begin_set_parameter(param);
-        setter.set_parameter(param, value);
-        setter.end_set_parameter(param);
-    }
-}
-
 pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &Arc<BaseIOParams>) {
     ui.horizontal_wrapped(|ui| {
         ui.group(|ui| {
@@ -243,18 +224,6 @@ pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &A
                     });
                 });
             });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Oversampling").strong());
-            ui.horizontal(|ui| {
-                ui.label("Rate");
-                ovs_combo(ui, setter, &params.mlc_ovs_factor);
-            });
-            ui.label(
-                egui::RichText::new("Lanczos3 anti-alias")
-                    .small()
-                    .color(egui::Color32::GRAY),
-            );
         });
         ui.group(|ui| {
             ui.label(egui::RichText::new("Clean Blend").strong());
