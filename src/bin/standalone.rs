@@ -4,7 +4,7 @@ use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, Ext
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
 use distortion::core::state::plugin_params::{
-    AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos,
+    AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos, MlcTab,
 };
 #[cfg(feature = "lab")]
 use distortion::core::ui::{draw_lab_panel, LabUiState};
@@ -508,6 +508,9 @@ struct StandaloneApp {
     is_loading: bool,
     active_panel: ActivePanel,
 
+    /// Currently selected tab of the MLC ZERO V panel (UI-thread only).
+    mlc_tab: MlcTab,
+
     standalone_state: Arc<Mutex<StandaloneState>>,
 
     // --- Cabinet IR (UI-thread handles) ---
@@ -704,8 +707,7 @@ fn audio_worker(
                                             }
 
                                             // Brickwall limiter (estágio final, após master gain).
-                                            let mut limiter =
-                                                PeakLimiter::new(-1.0, 50.0, s_rate);
+                                            let mut limiter = PeakLimiter::new(-1.0, 50.0, s_rate);
 
                                             let mut pre_eq_l = FFTConvolver::default();
                                             let mut pre_eq_r = FFTConvolver::default();
@@ -1296,6 +1298,7 @@ impl StandaloneApp {
             show_settings: false,
             is_loading: true,
             active_panel: ActivePanel::None,
+            mlc_tab: MlcTab::default(),
             standalone_state,
             cabinet_library,
             cabinet_mailbox,
@@ -1795,6 +1798,10 @@ impl eframe::App for StandaloneApp {
         let mut ui_limiter_ceiling = snap_ui.limiter_ceiling;
         let mut ui_limiter_release = snap_ui.limiter_release;
 
+        // MLC panel tab selection (UI-thread only); written back after the panels
+        // render so the closure borrows a plain local rather than `self`.
+        let mut ui_mlc_tab = self.mlc_tab;
+
         let mut ui_eq_low_freq = snap_ui.eq_low_freq;
         let mut ui_eq_low_gain = snap_ui.eq_low_gain;
         let mut ui_eq_low_q = snap_ui.eq_low_q;
@@ -2158,312 +2165,498 @@ impl eframe::App for StandaloneApp {
             |ui| {
                 let mut changed = false;
                 use egui_knob::{Knob, KnobStyle};
+                // Tab bar. Splitting controls across tabs keeps each row within the
+                // panel width instead of overflowing horizontally.
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut ui_mlc_tab, MlcTab::Tone, "Tone");
+                    ui.selectable_value(&mut ui_mlc_tab, MlcTab::GainClip, "Gain/Clip");
+                    ui.selectable_value(&mut ui_mlc_tab, MlcTab::Harmonics, "Harmonics");
+                    ui.selectable_value(&mut ui_mlc_tab, MlcTab::Limiter, "Limiter");
+                });
+                ui.separator();
                 ui.horizontal_wrapped(|ui| {
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Gain + Clip").strong());
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label("Gain");
-                                if ui
-                                    .add(
-                                        Knob::new(&mut ui_mlc_gain, 0.001, 1.0, KnobStyle::Wiper)
+                    if ui_mlc_tab == MlcTab::GainClip {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Gain + Clip").strong());
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label("Gain");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_gain,
+                                                0.001,
+                                                1.0,
+                                                KnobStyle::Wiper,
+                                            )
                                             .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:.2}", ui_mlc_gain))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                            ui.vertical(|ui| {
-                                ui.label("Master");
-                                if ui
-                                    .add(
-                                        Knob::new(&mut ui_mlc_master, 0.001, 1.0, KnobStyle::Wiper)
-                                            .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:.2}", ui_mlc_master))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                            ui.vertical(|ui| {
-                                ui.label("Clip per stage");
-                                let stages: [(&str, ClipType); 3] = [
-                                    ("1", snap_ui.mlc_clip_type1),
-                                    ("2", snap_ui.mlc_clip_type2),
-                                    ("3", snap_ui.mlc_clip_type3),
-                                ];
-                                for (idx, (tag, current)) in stages.into_iter().enumerate() {
-                                    let mut clip_type = current;
-                                    ui.horizontal(|ui| {
-                                        ui.label(tag);
-                                        egui::ComboBox::from_id_salt(format!(
-                                            "standalone_mlc_clip_type{idx}"
-                                        ))
-                                        .width(120.0)
-                                        .selected_text(clip_type.label())
-                                        .show_ui(ui, |ui| {
-                                            for clip in ClipType::ALL {
-                                                ui.selectable_value(
-                                                    &mut clip_type,
-                                                    clip,
-                                                    clip.label(),
-                                                );
-                                            }
-                                        });
-                                    });
-                                    if clip_type != current {
+                                        )
+                                        .changed()
+                                    {
                                         changed = true;
-                                        if let Ok(mut st) = self.standalone_state.lock() {
-                                            match idx {
-                                                0 => st.mlc_clip_type1 = clip_type,
-                                                1 => st.mlc_clip_type2 = clip_type,
-                                                _ => st.mlc_clip_type3 = clip_type,
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.2}", ui_mlc_gain))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label("Master");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_master,
+                                                0.001,
+                                                1.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{:.2}", ui_mlc_master))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label("Clip per stage");
+                                    let stages: [(&str, ClipType); 3] = [
+                                        ("1", snap_ui.mlc_clip_type1),
+                                        ("2", snap_ui.mlc_clip_type2),
+                                        ("3", snap_ui.mlc_clip_type3),
+                                    ];
+                                    for (idx, (tag, current)) in stages.into_iter().enumerate() {
+                                        let mut clip_type = current;
+                                        ui.horizontal(|ui| {
+                                            ui.label(tag);
+                                            egui::ComboBox::from_id_salt(format!(
+                                                "standalone_mlc_clip_type{idx}"
+                                            ))
+                                            .width(120.0)
+                                            .selected_text(clip_type.label())
+                                            .show_ui(
+                                                ui,
+                                                |ui| {
+                                                    for clip in ClipType::ALL {
+                                                        ui.selectable_value(
+                                                            &mut clip_type,
+                                                            clip,
+                                                            clip.label(),
+                                                        );
+                                                    }
+                                                },
+                                            );
+                                        });
+                                        if clip_type != current {
+                                            changed = true;
+                                            if let Ok(mut st) = self.standalone_state.lock() {
+                                                match idx {
+                                                    0 => st.mlc_clip_type1 = clip_type,
+                                                    1 => st.mlc_clip_type2 = clip_type,
+                                                    _ => st.mlc_clip_type3 = clip_type,
+                                                }
                                             }
                                         }
                                     }
-                                }
-                            });
-                        });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("EQ").strong());
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label("Bass");
-                                if ui
-                                    .add(
-                                        Knob::new(&mut ui_mlc_bass, -12.0, 12.0, KnobStyle::Wiper)
-                                            .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_bass))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                            ui.vertical(|ui| {
-                                ui.label("Middle");
-                                if ui
-                                    .add(
-                                        Knob::new(
-                                            &mut ui_mlc_middle,
-                                            -12.0,
-                                            12.0,
-                                            KnobStyle::Wiper,
-                                        )
-                                        .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_middle))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                            ui.vertical(|ui| {
-                                ui.label("Treble");
-                                if ui
-                                    .add(
-                                        Knob::new(
-                                            &mut ui_mlc_treble,
-                                            -12.0,
-                                            12.0,
-                                            KnobStyle::Wiper,
-                                        )
-                                        .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_treble))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                        });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Power Amp").strong());
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label("Presence");
-                                if ui
-                                    .add(
-                                        Knob::new(
-                                            &mut ui_mlc_presence,
-                                            -12.0,
-                                            12.0,
-                                            KnobStyle::Wiper,
-                                        )
-                                        .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_presence))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                            ui.vertical(|ui| {
-                                ui.label("Depth");
-                                if ui
-                                    .add(
-                                        Knob::new(&mut ui_mlc_depth, -12.0, 12.0, KnobStyle::Wiper)
-                                            .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:+.1} dB", ui_mlc_depth))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                        });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Switches").strong());
-                        let mut bright = snap_ui.mlc_bright;
-                        let mut feedback = snap_ui.mlc_feedback;
-                        let mut gate_pos = snap_ui.mlc_gate_pos;
-                        let mut m45 = snap_ui.mlc_m45;
-                        let mut warclaw = snap_ui.mlc_warclaw;
-                        ui.horizontal(|ui| {
-                            ui.label("Bright");
-                            egui::ComboBox::from_id_salt("standalone_mlc_bright")
-                                .selected_text(match bright {
-                                    MlcBright::I => "I",
-                                    MlcBright::Ii => "II",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut bright, MlcBright::I, "I");
-                                    ui.selectable_value(&mut bright, MlcBright::Ii, "II");
                                 });
-                            if ui.checkbox(&mut m45, "M45").changed() {
-                                changed = true;
-                            }
-                            if ui.checkbox(&mut warclaw, "WARCLAW").changed() {
-                                changed = true;
-                            }
-                            ui.label("Feedback");
-                            egui::ComboBox::from_id_salt("standalone_mlc_feedback")
-                                .selected_text(match feedback {
-                                    MlcFeedback::Lo => "Lo",
-                                    MlcFeedback::Hi => "Hi",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut feedback, MlcFeedback::Lo, "Lo");
-                                    ui.selectable_value(&mut feedback, MlcFeedback::Hi, "Hi");
-                                });
-                            ui.label("Gate Pos");
-                            egui::ComboBox::from_id_salt("standalone_mlc_gate_pos")
-                                .selected_text(match gate_pos {
-                                    MlcGatePos::Pre => "Pre",
-                                    MlcGatePos::Post => "Post",
-                                })
-                                .show_ui(ui, |ui| {
-                                    ui.selectable_value(&mut gate_pos, MlcGatePos::Pre, "Pre");
-                                    ui.selectable_value(&mut gate_pos, MlcGatePos::Post, "Post");
-                                });
-                        });
-                        if bright != snap_ui.mlc_bright
-                            || feedback != snap_ui.mlc_feedback
-                            || gate_pos != snap_ui.mlc_gate_pos
-                            || m45 != snap_ui.mlc_m45
-                            || warclaw != snap_ui.mlc_warclaw
-                        {
-                            changed = true;
-                            if let Ok(mut st) = self.standalone_state.lock() {
-                                st.mlc_bright = bright;
-                                st.mlc_feedback = feedback;
-                                st.mlc_gate_pos = gate_pos;
-                                st.mlc_m45 = m45;
-                                st.mlc_warclaw = warclaw;
-                            }
-                        }
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Tight").strong());
-                        let mut tight = snap_ui.mlc_tight;
-                        ui.horizontal(|ui| {
-                            if ui.checkbox(&mut tight, "Enable").changed() {
-                                changed = true;
-                                if let Ok(mut st) = self.standalone_state.lock() {
-                                    st.mlc_tight = tight;
-                                }
-                            }
-                            ui.label(
-                                egui::RichText::new("HPF 80Hz entre estágios")
-                                    .small()
-                                    .color(egui::Color32::GRAY),
-                            );
-                        });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Harmonics").strong());
-                        let mut asymmetry_enable = snap_ui.mlc_asymmetry_enable;
-                        ui.vertical(|ui| {
-                            if ui.checkbox(&mut asymmetry_enable, "Enable").changed() {
-                                changed = true;
-                                if let Ok(mut st) = self.standalone_state.lock() {
-                                    st.mlc_asymmetry_enable = asymmetry_enable;
-                                }
-                            }
-                            ui.horizontal(|ui| {
-                                ui.label("odd");
-                                if ui
-                                    .add(egui::Slider::new(&mut ui_mlc_asymmetry, 0.0..=1.0))
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label("even");
                             });
                         });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Pre-Shape").strong());
-                        let mut preshape = snap_ui.mlc_preshape;
-                        ui.vertical(|ui| {
-                            if ui.checkbox(&mut preshape, "Enable").changed() {
-                                changed = true;
-                                if let Ok(mut st) = self.standalone_state.lock() {
-                                    st.mlc_preshape = preshape;
-                                }
-                            }
+                    }
+                    if ui_mlc_tab == MlcTab::Tone {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("EQ").strong());
                             ui.horizontal(|ui| {
                                 ui.vertical(|ui| {
-                                    ui.label("Tight");
+                                    ui.label("Bass");
                                     if ui
                                         .add(
                                             Knob::new(
-                                                &mut ui_mlc_preshape_tight,
-                                                -6.0,
+                                                &mut ui_mlc_bass,
+                                                -12.0,
+                                                12.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{:+.1} dB", ui_mlc_bass))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label("Middle");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_middle,
+                                                -12.0,
+                                                12.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{:+.1} dB", ui_mlc_middle))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label("Treble");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_treble,
+                                                -12.0,
+                                                12.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{:+.1} dB", ui_mlc_treble))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::Tone {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Power Amp").strong());
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label("Presence");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_presence,
+                                                -12.0,
+                                                12.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{:+.1} dB", ui_mlc_presence))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                                ui.vertical(|ui| {
+                                    ui.label("Depth");
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_mlc_depth,
+                                                -12.0,
+                                                12.0,
+                                                KnobStyle::Wiper,
+                                            )
+                                            .with_size(45.0),
+                                        )
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(format!("{:+.1} dB", ui_mlc_depth))
+                                            .small()
+                                            .monospace(),
+                                    );
+                                });
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::Tone {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Switches").strong());
+                            let mut bright = snap_ui.mlc_bright;
+                            let mut feedback = snap_ui.mlc_feedback;
+                            let mut gate_pos = snap_ui.mlc_gate_pos;
+                            let mut m45 = snap_ui.mlc_m45;
+                            let mut warclaw = snap_ui.mlc_warclaw;
+                            ui.horizontal(|ui| {
+                                ui.label("Bright");
+                                egui::ComboBox::from_id_salt("standalone_mlc_bright")
+                                    .selected_text(match bright {
+                                        MlcBright::I => "I",
+                                        MlcBright::Ii => "II",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut bright, MlcBright::I, "I");
+                                        ui.selectable_value(&mut bright, MlcBright::Ii, "II");
+                                    });
+                                if ui.checkbox(&mut m45, "M45").changed() {
+                                    changed = true;
+                                }
+                                if ui.checkbox(&mut warclaw, "WARCLAW").changed() {
+                                    changed = true;
+                                }
+                                ui.label("Feedback");
+                                egui::ComboBox::from_id_salt("standalone_mlc_feedback")
+                                    .selected_text(match feedback {
+                                        MlcFeedback::Lo => "Lo",
+                                        MlcFeedback::Hi => "Hi",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut feedback, MlcFeedback::Lo, "Lo");
+                                        ui.selectable_value(&mut feedback, MlcFeedback::Hi, "Hi");
+                                    });
+                                ui.label("Gate Pos");
+                                egui::ComboBox::from_id_salt("standalone_mlc_gate_pos")
+                                    .selected_text(match gate_pos {
+                                        MlcGatePos::Pre => "Pre",
+                                        MlcGatePos::Post => "Post",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut gate_pos, MlcGatePos::Pre, "Pre");
+                                        ui.selectable_value(
+                                            &mut gate_pos,
+                                            MlcGatePos::Post,
+                                            "Post",
+                                        );
+                                    });
+                            });
+                            if bright != snap_ui.mlc_bright
+                                || feedback != snap_ui.mlc_feedback
+                                || gate_pos != snap_ui.mlc_gate_pos
+                                || m45 != snap_ui.mlc_m45
+                                || warclaw != snap_ui.mlc_warclaw
+                            {
+                                changed = true;
+                                if let Ok(mut st) = self.standalone_state.lock() {
+                                    st.mlc_bright = bright;
+                                    st.mlc_feedback = feedback;
+                                    st.mlc_gate_pos = gate_pos;
+                                    st.mlc_m45 = m45;
+                                    st.mlc_warclaw = warclaw;
+                                }
+                            }
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::Tone {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Tight").strong());
+                            let mut tight = snap_ui.mlc_tight;
+                            ui.horizontal(|ui| {
+                                if ui.checkbox(&mut tight, "Enable").changed() {
+                                    changed = true;
+                                    if let Ok(mut st) = self.standalone_state.lock() {
+                                        st.mlc_tight = tight;
+                                    }
+                                }
+                                ui.label(
+                                    egui::RichText::new("HPF 80Hz entre estágios")
+                                        .small()
+                                        .color(egui::Color32::GRAY),
+                                );
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::Harmonics {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Harmonics").strong());
+                            let mut asymmetry_enable = snap_ui.mlc_asymmetry_enable;
+                            ui.vertical(|ui| {
+                                if ui.checkbox(&mut asymmetry_enable, "Enable").changed() {
+                                    changed = true;
+                                    if let Ok(mut st) = self.standalone_state.lock() {
+                                        st.mlc_asymmetry_enable = asymmetry_enable;
+                                    }
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label("odd");
+                                    if ui
+                                        .add(egui::Slider::new(&mut ui_mlc_asymmetry, 0.0..=1.0))
+                                        .changed()
+                                    {
+                                        changed = true;
+                                    }
+                                    ui.label("even");
+                                });
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::GainClip {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Pre-Shape").strong());
+                            let mut preshape = snap_ui.mlc_preshape;
+                            ui.vertical(|ui| {
+                                if ui.checkbox(&mut preshape, "Enable").changed() {
+                                    changed = true;
+                                    if let Ok(mut st) = self.standalone_state.lock() {
+                                        st.mlc_preshape = preshape;
+                                    }
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.vertical(|ui| {
+                                        ui.label("Tight");
+                                        if ui
+                                            .add(
+                                                Knob::new(
+                                                    &mut ui_mlc_preshape_tight,
+                                                    -6.0,
+                                                    0.0,
+                                                    KnobStyle::Wiper,
+                                                )
+                                                .with_size(45.0),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{:+.1} dB",
+                                                ui_mlc_preshape_tight
+                                            ))
+                                            .small()
+                                            .monospace(),
+                                        );
+                                    });
+                                    ui.vertical(|ui| {
+                                        ui.label("Bite");
+                                        if ui
+                                            .add(
+                                                Knob::new(
+                                                    &mut ui_mlc_preshape_bite,
+                                                    0.0,
+                                                    6.0,
+                                                    KnobStyle::Wiper,
+                                                )
+                                                .with_size(45.0),
+                                            )
+                                            .changed()
+                                        {
+                                            changed = true;
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "{:+.1} dB",
+                                                ui_mlc_preshape_bite
+                                            ))
+                                            .small()
+                                            .monospace(),
+                                        );
+                                    });
+                                });
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::GainClip {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Clean Blend + Sag").strong());
+                            ui.vertical(|ui| {
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut ui_mlc_clean_blend, 0.0..=0.25)
+                                            .text("Dry"),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if ui
+                                    .add(egui::Slider::new(&mut ui_mlc_sag, 0.0..=1.0).text("Sag"))
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::Harmonics {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Chebyshev").strong());
+                            ui.vertical(|ui| {
+                                if ui
+                                    .add(egui::Slider::new(&mut ui_mlc_h2, 0.0..=1.0).text("H2"))
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if ui
+                                    .add(egui::Slider::new(&mut ui_mlc_h3, 0.0..=1.0).text("H3"))
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                if ui
+                                    .add(egui::Slider::new(&mut ui_mlc_h4, 0.0..=1.0).text("H4"))
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::Tone {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("Gate").strong());
+                            ui.vertical(|ui| {
+                                ui.label("Threshold");
+                                if ui
+                                    .add(
+                                        Knob::new(&mut ui_mlc_gate, -80.0, 0.0, KnobStyle::Wiper)
+                                            .with_size(45.0),
+                                    )
+                                    .changed()
+                                {
+                                    changed = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(format!("{:.0} dB", ui_mlc_gate))
+                                        .small()
+                                        .monospace(),
+                                );
+                            });
+                        });
+                    }
+                    if ui_mlc_tab == MlcTab::Limiter {
+                        ui.group(|ui| {
+                            ui.label(egui::RichText::new("LIMITER").strong());
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.add_space(14.0);
+                                    if ui.checkbox(&mut ui_limiter_enable, "Enable").changed() {
+                                        changed = true;
+                                    }
+                                });
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Ceiling")
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                    if ui
+                                        .add(
+                                            Knob::new(
+                                                &mut ui_limiter_ceiling,
+                                                -12.0,
                                                 0.0,
                                                 KnobStyle::Wiper,
                                             )
@@ -2475,21 +2668,25 @@ impl eframe::App for StandaloneApp {
                                     }
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "{:+.1} dB",
-                                            ui_mlc_preshape_tight
+                                            "{:.1} dB",
+                                            ui_limiter_ceiling
                                         ))
                                         .small()
                                         .monospace(),
                                     );
                                 });
-                                ui.vertical(|ui| {
-                                    ui.label("Bite");
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("Release")
+                                            .small()
+                                            .color(egui::Color32::GRAY),
+                                    );
                                     if ui
                                         .add(
                                             Knob::new(
-                                                &mut ui_mlc_preshape_bite,
-                                                0.0,
-                                                6.0,
+                                                &mut ui_limiter_release,
+                                                10.0,
+                                                500.0,
                                                 KnobStyle::Wiper,
                                             )
                                             .with_size(45.0),
@@ -2500,8 +2697,8 @@ impl eframe::App for StandaloneApp {
                                     }
                                     ui.label(
                                         egui::RichText::new(format!(
-                                            "{:+.1} dB",
-                                            ui_mlc_preshape_bite
+                                            "{:.0} ms",
+                                            ui_limiter_release
                                         ))
                                         .small()
                                         .monospace(),
@@ -2509,133 +2706,7 @@ impl eframe::App for StandaloneApp {
                                 });
                             });
                         });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Clean Blend + Sag").strong());
-                        ui.vertical(|ui| {
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut ui_mlc_clean_blend, 0.0..=0.25)
-                                        .text("Dry"),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            if ui
-                                .add(egui::Slider::new(&mut ui_mlc_sag, 0.0..=1.0).text("Sag"))
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Chebyshev").strong());
-                        ui.vertical(|ui| {
-                            if ui
-                                .add(egui::Slider::new(&mut ui_mlc_h2, 0.0..=1.0).text("H2"))
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            if ui
-                                .add(egui::Slider::new(&mut ui_mlc_h3, 0.0..=1.0).text("H3"))
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            if ui
-                                .add(egui::Slider::new(&mut ui_mlc_h4, 0.0..=1.0).text("H4"))
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                        });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("Gate").strong());
-                        ui.vertical(|ui| {
-                            ui.label("Threshold");
-                            if ui
-                                .add(
-                                    Knob::new(&mut ui_mlc_gate, -80.0, 0.0, KnobStyle::Wiper)
-                                        .with_size(45.0),
-                                )
-                                .changed()
-                            {
-                                changed = true;
-                            }
-                            ui.label(
-                                egui::RichText::new(format!("{:.0} dB", ui_mlc_gate))
-                                    .small()
-                                    .monospace(),
-                            );
-                        });
-                    });
-                    ui.group(|ui| {
-                        ui.label(egui::RichText::new("LIMITER").strong());
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.add_space(14.0);
-                                if ui.checkbox(&mut ui_limiter_enable, "Enable").changed() {
-                                    changed = true;
-                                }
-                            });
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Ceiling")
-                                        .small()
-                                        .color(egui::Color32::GRAY),
-                                );
-                                if ui
-                                    .add(
-                                        Knob::new(
-                                            &mut ui_limiter_ceiling,
-                                            -12.0,
-                                            0.0,
-                                            KnobStyle::Wiper,
-                                        )
-                                        .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:.1} dB", ui_limiter_ceiling))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                            ui.vertical_centered(|ui| {
-                                ui.label(
-                                    egui::RichText::new("Release")
-                                        .small()
-                                        .color(egui::Color32::GRAY),
-                                );
-                                if ui
-                                    .add(
-                                        Knob::new(
-                                            &mut ui_limiter_release,
-                                            10.0,
-                                            500.0,
-                                            KnobStyle::Wiper,
-                                        )
-                                        .with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:.0} ms", ui_limiter_release))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                        });
-                    });
+                    }
                 });
                 if changed {
                     if let Ok(mut st) = self.standalone_state.lock() {
@@ -2824,6 +2895,7 @@ impl eframe::App for StandaloneApp {
                 );
             },
         );
+        self.mlc_tab = ui_mlc_tab;
 
         #[cfg(feature = "lab")]
         {

@@ -272,6 +272,7 @@ impl Plugin for BaseIO {
                 analyzer: dsp::AnalyzerDsp::default(),
                 consumer: consumer_mutex,
                 active_panel: ActivePanel::None,
+                mlc_tab: crate::core::state::plugin_params::MlcTab::default(),
                 cabinet_library: self.cabinet_library.clone(),
                 cabinet_mailbox: self.cabinet_engine.mailbox(),
                 cabinet_sr: self.cabinet_sr.clone(),
@@ -550,7 +551,12 @@ impl Plugin for BaseIO {
                         });
                     },
                     |ui| {
-                        crate::core::ui::draw_mlc_zero_v_panel(ui, setter, &state.params);
+                        crate::core::ui::draw_mlc_zero_v_panel(
+                            ui,
+                            setter,
+                            &state.params,
+                            &mut state.mlc_tab,
+                        );
                     },
                     |ui| {
                         // Build a runtime and, only on success, hand it to the audio
@@ -899,7 +905,11 @@ impl Plugin for BaseIO {
             clip_type1: self.params.mlc_clip_type1.value().as_f32(),
             clip_type2: self.params.mlc_clip_type2.value().as_f32(),
             clip_type3: self.params.mlc_clip_type3.value().as_f32(),
-            tight: if self.params.mlc_tight.value() { 1.0 } else { 0.0 },
+            tight: if self.params.mlc_tight.value() {
+                1.0
+            } else {
+                0.0
+            },
             asymmetry_enable: if self.params.mlc_asymmetry_enable.value() {
                 1.0
             } else {

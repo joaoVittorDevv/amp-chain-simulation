@@ -46,6 +46,23 @@ pub enum MlcGatePos {
     Post,
 }
 
+/// Which tab of the MLC ZERO V panel is currently shown. Pure UI state — the
+/// controls are split across tabs so the panel fits horizontally instead of
+/// overflowing. Not a DSP parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MlcTab {
+    Tone,
+    GainClip,
+    Harmonics,
+    Limiter,
+}
+
+impl Default for MlcTab {
+    fn default() -> Self {
+        MlcTab::Tone
+    }
+}
+
 /// Selectable clipping / saturation curve for a MLC ZERO V gain stage.
 /// The integer index (0-2) is passed to the Faust `Clip Type N` parameters and
 /// must stay in sync with the `clip_sel()` selector in `dsp/mlc_zero_v.dsp`.
@@ -274,6 +291,9 @@ pub struct EditorState {
     pub consumer: Arc<Mutex<Option<Consumer<f32>>>>,
     pub active_panel: crate::core::ui::ActivePanel,
 
+    /// Currently selected tab of the MLC ZERO V panel (UI-thread only).
+    pub mlc_tab: MlcTab,
+
     // --- Cabinet IR (UI-thread only) ---
     pub cabinet_library: Arc<Mutex<crate::core::cabinet::CabinetLibrary>>,
     pub cabinet_mailbox: Arc<crate::core::cabinet::CabinetMailbox>,
@@ -482,17 +502,16 @@ impl Default for BaseIOParams {
             mlc_clean_blend: FloatParam::new(
                 "MLC Clean Blend",
                 0.0,
-                FloatRange::Linear { min: 0.0, max: 0.25 },
+                FloatRange::Linear {
+                    min: 0.0,
+                    max: 0.25,
+                },
             )
             .with_smoother(SmoothingStyle::Linear(50.0))
             .with_value_to_string(formatters::v2s_f32_rounded(2)),
-            mlc_sag: FloatParam::new(
-                "MLC Sag",
-                0.0,
-                FloatRange::Linear { min: 0.0, max: 1.0 },
-            )
-            .with_smoother(SmoothingStyle::Linear(50.0))
-            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_sag: FloatParam::new("MLC Sag", 0.0, FloatRange::Linear { min: 0.0, max: 1.0 })
+                .with_smoother(SmoothingStyle::Linear(50.0))
+                .with_value_to_string(formatters::v2s_f32_rounded(2)),
             mlc_h2: FloatParam::new(
                 "MLC Chebyshev H2",
                 0.0,
@@ -528,7 +547,10 @@ impl Default for BaseIOParams {
             mlc_preshape_tight: FloatParam::new(
                 "Pre-Shape Tight",
                 -3.0,
-                FloatRange::Linear { min: -6.0, max: 0.0 },
+                FloatRange::Linear {
+                    min: -6.0,
+                    max: 0.0,
+                },
             )
             .with_smoother(SmoothingStyle::Linear(50.0))
             .with_unit(" dB")

@@ -1,5 +1,5 @@
 use crate::core::state::plugin_params::{
-    BaseIOParams, ClipType, MlcBright, MlcFeedback, MlcGatePos,
+    BaseIOParams, ClipType, MlcBright, MlcFeedback, MlcGatePos, MlcTab,
 };
 use nih_plug::prelude::{BoolParam, EnumParam, FloatParam, ParamSetter};
 use nih_plug_egui::egui;
@@ -174,12 +174,7 @@ fn gate_pos_switch(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<Ml
     }
 }
 
-fn clip_type_combo(
-    ui: &mut egui::Ui,
-    setter: &ParamSetter,
-    id: &str,
-    param: &EnumParam<ClipType>,
-) {
+fn clip_type_combo(ui: &mut egui::Ui, setter: &ParamSetter, id: &str, param: &EnumParam<ClipType>) {
     let mut value = param.value();
     egui::ComboBox::from_id_salt(id)
         .width(130.0)
@@ -197,123 +192,154 @@ fn clip_type_combo(
     }
 }
 
-pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &Arc<BaseIOParams>) {
-    ui.horizontal_wrapped(|ui| {
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Gain + Clip").strong());
-            ui.horizontal(|ui| {
-                param_knob(ui, setter, "Gain", &params.mlc_gain);
-                param_knob(ui, setter, "Master", &params.mlc_master);
-                ui.vertical(|ui| {
-                    ui.label(
-                        egui::RichText::new("Clip per stage")
-                            .small()
-                            .color(egui::Color32::GRAY),
-                    );
-                    ui.horizontal(|ui| {
-                        ui.label("1");
-                        clip_type_combo(ui, setter, "mlc_clip1", &params.mlc_clip_type1);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("2");
-                        clip_type_combo(ui, setter, "mlc_clip2", &params.mlc_clip_type2);
-                    });
-                    ui.horizontal(|ui| {
-                        ui.label("3");
-                        clip_type_combo(ui, setter, "mlc_clip3", &params.mlc_clip_type3);
-                    });
-                });
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Clean Blend").strong());
-            ui.vertical(|ui| {
-                param_slider(ui, setter, "Dry", &params.mlc_clean_blend);
-                param_slider(ui, setter, "Sag", &params.mlc_sag);
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Chebyshev").strong());
-            ui.vertical(|ui| {
-                param_slider(ui, setter, "H2", &params.mlc_h2);
-                param_slider(ui, setter, "H3", &params.mlc_h3);
-                param_slider(ui, setter, "H4", &params.mlc_h4);
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Tight").strong());
-            ui.horizontal(|ui| {
-                bool_switch(ui, setter, "Enable", &params.mlc_tight);
-                ui.label(
-                    egui::RichText::new("HPF 80Hz entre estágios")
-                        .small()
-                        .color(egui::Color32::GRAY),
-                );
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Harmonics").strong());
-            ui.vertical(|ui| {
-                bool_switch(ui, setter, "Enable", &params.mlc_asymmetry_enable);
-                ui.horizontal(|ui| {
-                    ui.label("odd");
-                    param_slider(ui, setter, "Asymmetry", &params.mlc_asymmetry);
-                    ui.label("even");
-                });
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Pre-Shape").strong());
-            ui.vertical(|ui| {
-                bool_switch(ui, setter, "Enable", &params.mlc_preshape);
-                ui.horizontal(|ui| {
-                    param_knob(ui, setter, "Tight", &params.mlc_preshape_tight);
-                    param_knob(ui, setter, "Bite", &params.mlc_preshape_bite);
-                });
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("EQ").strong());
-            ui.horizontal(|ui| {
-                param_knob(ui, setter, "Bass", &params.mlc_bass);
-                param_knob(ui, setter, "Middle", &params.mlc_middle);
-                param_knob(ui, setter, "Treble", &params.mlc_treble);
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Power Amp").strong());
-            ui.horizontal(|ui| {
-                param_knob(ui, setter, "Presence", &params.mlc_presence);
-                param_knob(ui, setter, "Depth", &params.mlc_depth);
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Switches").strong());
-            ui.horizontal(|ui| {
-                ui.label("Bright");
-                bright_switch(ui, setter, &params.mlc_bright);
-                bool_switch(ui, setter, "M45", &params.mlc_m45);
-                bool_switch(ui, setter, "WARCLAW", &params.mlc_warclaw);
-                ui.label("Feedback");
-                feedback_switch(ui, setter, &params.mlc_feedback);
-                ui.label("Gate");
-                gate_pos_switch(ui, setter, &params.mlc_gate_pos);
-            });
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("Gate").strong());
-            param_knob(ui, setter, "Threshold", &params.mlc_gate);
-        });
-        ui.group(|ui| {
-            ui.label(egui::RichText::new("LIMITER").strong());
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.add_space(14.0);
-                    bool_switch(ui, setter, "Enable", &params.limiter_enable);
-                });
-                param_knob_unit(ui, setter, "Ceiling", &params.limiter_ceiling, 1, " dB");
-                param_knob_unit(ui, setter, "Release", &params.limiter_release, 0, " ms");
-            });
-        });
+pub fn draw_mlc_zero_v_panel(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    params: &Arc<BaseIOParams>,
+    mlc_tab: &mut MlcTab,
+) {
+    // Tab bar. The controls are split across tabs so each tab's row fits the
+    // panel width instead of overflowing horizontally.
+    ui.horizontal(|ui| {
+        ui.selectable_value(mlc_tab, MlcTab::Tone, "Tone");
+        ui.selectable_value(mlc_tab, MlcTab::GainClip, "Gain/Clip");
+        ui.selectable_value(mlc_tab, MlcTab::Harmonics, "Harmonics");
+        ui.selectable_value(mlc_tab, MlcTab::Limiter, "Limiter");
     });
+    ui.separator();
+
+    match *mlc_tab {
+        MlcTab::Tone => {
+            ui.horizontal_wrapped(|ui| {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("EQ").strong());
+                    ui.horizontal(|ui| {
+                        param_knob(ui, setter, "Bass", &params.mlc_bass);
+                        param_knob(ui, setter, "Middle", &params.mlc_middle);
+                        param_knob(ui, setter, "Treble", &params.mlc_treble);
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Power Amp").strong());
+                    ui.horizontal(|ui| {
+                        param_knob(ui, setter, "Presence", &params.mlc_presence);
+                        param_knob(ui, setter, "Depth", &params.mlc_depth);
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Switches").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Bright");
+                        bright_switch(ui, setter, &params.mlc_bright);
+                        bool_switch(ui, setter, "M45", &params.mlc_m45);
+                        bool_switch(ui, setter, "WARCLAW", &params.mlc_warclaw);
+                        ui.label("Feedback");
+                        feedback_switch(ui, setter, &params.mlc_feedback);
+                        ui.label("Gate");
+                        gate_pos_switch(ui, setter, &params.mlc_gate_pos);
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Tight").strong());
+                    ui.horizontal(|ui| {
+                        bool_switch(ui, setter, "Enable", &params.mlc_tight);
+                        ui.label(
+                            egui::RichText::new("HPF 80Hz entre estágios")
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Gate").strong());
+                    param_knob(ui, setter, "Threshold", &params.mlc_gate);
+                });
+            });
+        }
+        MlcTab::GainClip => {
+            ui.horizontal_wrapped(|ui| {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Gain + Clip").strong());
+                    ui.horizontal(|ui| {
+                        param_knob(ui, setter, "Gain", &params.mlc_gain);
+                        param_knob(ui, setter, "Master", &params.mlc_master);
+                        ui.vertical(|ui| {
+                            ui.label(
+                                egui::RichText::new("Clip per stage")
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("1");
+                                clip_type_combo(ui, setter, "mlc_clip1", &params.mlc_clip_type1);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("2");
+                                clip_type_combo(ui, setter, "mlc_clip2", &params.mlc_clip_type2);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("3");
+                                clip_type_combo(ui, setter, "mlc_clip3", &params.mlc_clip_type3);
+                            });
+                        });
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Clean Blend").strong());
+                    ui.vertical(|ui| {
+                        param_slider(ui, setter, "Dry", &params.mlc_clean_blend);
+                        param_slider(ui, setter, "Sag", &params.mlc_sag);
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Pre-Shape").strong());
+                    ui.vertical(|ui| {
+                        bool_switch(ui, setter, "Enable", &params.mlc_preshape);
+                        ui.horizontal(|ui| {
+                            param_knob(ui, setter, "Tight", &params.mlc_preshape_tight);
+                            param_knob(ui, setter, "Bite", &params.mlc_preshape_bite);
+                        });
+                    });
+                });
+            });
+        }
+        MlcTab::Harmonics => {
+            ui.horizontal_wrapped(|ui| {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Chebyshev").strong());
+                    ui.vertical(|ui| {
+                        param_slider(ui, setter, "H2", &params.mlc_h2);
+                        param_slider(ui, setter, "H3", &params.mlc_h3);
+                        param_slider(ui, setter, "H4", &params.mlc_h4);
+                    });
+                });
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("Harmonics").strong());
+                    ui.vertical(|ui| {
+                        bool_switch(ui, setter, "Enable", &params.mlc_asymmetry_enable);
+                        ui.horizontal(|ui| {
+                            ui.label("odd");
+                            param_slider(ui, setter, "Asymmetry", &params.mlc_asymmetry);
+                            ui.label("even");
+                        });
+                    });
+                });
+            });
+        }
+        MlcTab::Limiter => {
+            ui.horizontal_wrapped(|ui| {
+                ui.group(|ui| {
+                    ui.label(egui::RichText::new("LIMITER").strong());
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.add_space(14.0);
+                            bool_switch(ui, setter, "Enable", &params.limiter_enable);
+                        });
+                        param_knob_unit(ui, setter, "Ceiling", &params.limiter_ceiling, 1, " dB");
+                        param_knob_unit(ui, setter, "Release", &params.limiter_release, 0, " ms");
+                    });
+                });
+            });
+        }
+    }
 }
