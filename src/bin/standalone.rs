@@ -4,7 +4,7 @@ use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, Ext
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
 use distortion::core::state::plugin_params::{
-    AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos,
+    ovs_factor_label, AmpModel, ClipType, MlcBright, MlcFeedback, MlcGatePos,
 };
 #[cfg(feature = "lab")]
 use distortion::core::ui::{draw_lab_panel, LabUiState};
@@ -83,7 +83,15 @@ struct StandaloneState {
     mlc_warclaw: bool,
     mlc_feedback: MlcFeedback,
     mlc_gate_pos: MlcGatePos,
-    mlc_clip_type: ClipType,
+    mlc_clip_type1: ClipType,
+    mlc_clip_type2: ClipType,
+    mlc_clip_type3: ClipType,
+    mlc_ovs_factor: i32,
+    mlc_clean_blend: f32,
+    mlc_sag: f32,
+    mlc_h2: f32,
+    mlc_h3: f32,
+    mlc_h4: f32,
     mlc_tight: bool,
     mlc_asymmetry_enable: bool,
     mlc_asymmetry: f32,
@@ -135,7 +143,15 @@ impl Default for StandaloneState {
             mlc_warclaw: false,
             mlc_feedback: MlcFeedback::Hi,
             mlc_gate_pos: MlcGatePos::Pre,
-            mlc_clip_type: ClipType::AsymmetricTanh,
+            mlc_clip_type1: ClipType::AsymmetricTanh,
+            mlc_clip_type2: ClipType::AsymmetricTanh,
+            mlc_clip_type3: ClipType::Exponential,
+            mlc_ovs_factor: 0,
+            mlc_clean_blend: 0.0,
+            mlc_sag: 0.0,
+            mlc_h2: 0.0,
+            mlc_h3: 0.7,
+            mlc_h4: 0.2,
             mlc_tight: true,
             mlc_asymmetry_enable: true,
             mlc_asymmetry: 0.5,
@@ -188,7 +204,15 @@ struct AudioSnapshot {
     mlc_warclaw: bool,
     mlc_feedback: MlcFeedback,
     mlc_gate_pos: MlcGatePos,
-    mlc_clip_type: ClipType,
+    mlc_clip_type1: ClipType,
+    mlc_clip_type2: ClipType,
+    mlc_clip_type3: ClipType,
+    mlc_ovs_factor: i32,
+    mlc_clean_blend: f32,
+    mlc_sag: f32,
+    mlc_h2: f32,
+    mlc_h3: f32,
+    mlc_h4: f32,
     mlc_tight: bool,
     mlc_asymmetry_enable: bool,
     mlc_asymmetry: f32,
@@ -237,7 +261,15 @@ impl StandaloneState {
             mlc_warclaw: self.mlc_warclaw,
             mlc_feedback: self.mlc_feedback,
             mlc_gate_pos: self.mlc_gate_pos,
-            mlc_clip_type: self.mlc_clip_type,
+            mlc_clip_type1: self.mlc_clip_type1,
+            mlc_clip_type2: self.mlc_clip_type2,
+            mlc_clip_type3: self.mlc_clip_type3,
+            mlc_ovs_factor: self.mlc_ovs_factor,
+            mlc_clean_blend: self.mlc_clean_blend,
+            mlc_sag: self.mlc_sag,
+            mlc_h2: self.mlc_h2,
+            mlc_h3: self.mlc_h3,
+            mlc_h4: self.mlc_h4,
             mlc_tight: self.mlc_tight,
             mlc_asymmetry_enable: self.mlc_asymmetry_enable,
             mlc_asymmetry: self.mlc_asymmetry,
@@ -299,7 +331,9 @@ fn process_standalone_amp(
                 MlcGatePos::Pre => 0.0,
                 MlcGatePos::Post => 1.0,
             };
-            let clip_type = snap.mlc_clip_type.as_f32();
+            let clip_type1 = snap.mlc_clip_type1.as_f32();
+            let clip_type2 = snap.mlc_clip_type2.as_f32();
+            let clip_type3 = snap.mlc_clip_type3.as_f32();
             let tight = if snap.mlc_tight { 1.0 } else { 0.0 };
             let asymmetry_enable = if snap.mlc_asymmetry_enable { 1.0 } else { 0.0 };
             let preshape = if snap.mlc_preshape { 1.0 } else { 0.0 };
@@ -317,13 +351,21 @@ fn process_standalone_amp(
                 mlc.set_warclaw(snap.mlc_warclaw);
                 mlc.set_feedback(feedback);
                 mlc.set_gate_pos(gate_pos);
-                mlc.set_clip_type(clip_type);
+                mlc.set_clip_type1(clip_type1);
+                mlc.set_clip_type2(clip_type2);
+                mlc.set_clip_type3(clip_type3);
                 mlc.set_tight(tight);
                 mlc.set_asymmetry_enable(asymmetry_enable);
                 mlc.set_asymmetry(snap.mlc_asymmetry);
                 mlc.set_preshape(preshape);
                 mlc.set_preshape_tight(snap.mlc_preshape_tight);
                 mlc.set_preshape_bite(snap.mlc_preshape_bite);
+                mlc.set_clean_blend(snap.mlc_clean_blend);
+                mlc.set_sag(snap.mlc_sag);
+                mlc.set_h2(snap.mlc_h2);
+                mlc.set_h3(snap.mlc_h3);
+                mlc.set_h4(snap.mlc_h4);
+                mlc.set_ovs_factor(snap.mlc_ovs_factor);
                 mlc.process_block(buf_l.as_mut_ptr(), buf_l.len());
             }
             if let Some(mlc) = mlc_r {
@@ -340,13 +382,21 @@ fn process_standalone_amp(
                 mlc.set_warclaw(snap.mlc_warclaw);
                 mlc.set_feedback(feedback);
                 mlc.set_gate_pos(gate_pos);
-                mlc.set_clip_type(clip_type);
+                mlc.set_clip_type1(clip_type1);
+                mlc.set_clip_type2(clip_type2);
+                mlc.set_clip_type3(clip_type3);
                 mlc.set_tight(tight);
                 mlc.set_asymmetry_enable(asymmetry_enable);
                 mlc.set_asymmetry(snap.mlc_asymmetry);
                 mlc.set_preshape(preshape);
                 mlc.set_preshape_tight(snap.mlc_preshape_tight);
                 mlc.set_preshape_bite(snap.mlc_preshape_bite);
+                mlc.set_clean_blend(snap.mlc_clean_blend);
+                mlc.set_sag(snap.mlc_sag);
+                mlc.set_h2(snap.mlc_h2);
+                mlc.set_h3(snap.mlc_h3);
+                mlc.set_h4(snap.mlc_h4);
+                mlc.set_ovs_factor(snap.mlc_ovs_factor);
                 mlc.process_block(buf_r.as_mut_ptr(), buf_r.len());
             }
         }
@@ -1742,6 +1792,11 @@ impl eframe::App for StandaloneApp {
         let mut ui_mlc_asymmetry = snap_ui.mlc_asymmetry;
         let mut ui_mlc_preshape_tight = snap_ui.mlc_preshape_tight;
         let mut ui_mlc_preshape_bite = snap_ui.mlc_preshape_bite;
+        let mut ui_mlc_clean_blend = snap_ui.mlc_clean_blend;
+        let mut ui_mlc_sag = snap_ui.mlc_sag;
+        let mut ui_mlc_h2 = snap_ui.mlc_h2;
+        let mut ui_mlc_h3 = snap_ui.mlc_h3;
+        let mut ui_mlc_h4 = snap_ui.mlc_h4;
         let mut ui_limiter_enable = snap_ui.limiter_enable;
         let mut ui_limiter_ceiling = snap_ui.limiter_ceiling;
         let mut ui_limiter_release = snap_ui.limiter_release;
@@ -2148,24 +2203,58 @@ impl eframe::App for StandaloneApp {
                                 );
                             });
                             ui.vertical(|ui| {
-                                ui.label("Clip");
-                                let mut clip_type = snap_ui.mlc_clip_type;
-                                egui::ComboBox::from_id_salt("standalone_mlc_clip_type")
-                                    .width(130.0)
-                                    .selected_text(clip_type.label())
+                                ui.label("Clip per stage");
+                                let stages: [(&str, ClipType); 3] = [
+                                    ("1", snap_ui.mlc_clip_type1),
+                                    ("2", snap_ui.mlc_clip_type2),
+                                    ("3", snap_ui.mlc_clip_type3),
+                                ];
+                                for (idx, (tag, current)) in stages.into_iter().enumerate() {
+                                    let mut clip_type = current;
+                                    ui.horizontal(|ui| {
+                                        ui.label(tag);
+                                        egui::ComboBox::from_id_salt(format!(
+                                            "standalone_mlc_clip_type{idx}"
+                                        ))
+                                        .width(120.0)
+                                        .selected_text(clip_type.label())
+                                        .show_ui(ui, |ui| {
+                                            for clip in ClipType::ALL {
+                                                ui.selectable_value(
+                                                    &mut clip_type,
+                                                    clip,
+                                                    clip.label(),
+                                                );
+                                            }
+                                        });
+                                    });
+                                    if clip_type != current {
+                                        changed = true;
+                                        if let Ok(mut st) = self.standalone_state.lock() {
+                                            match idx {
+                                                0 => st.mlc_clip_type1 = clip_type,
+                                                1 => st.mlc_clip_type2 = clip_type,
+                                                _ => st.mlc_clip_type3 = clip_type,
+                                            }
+                                        }
+                                    }
+                                }
+                            });
+                            ui.vertical(|ui| {
+                                ui.label("Oversampling");
+                                let mut ovs = snap_ui.mlc_ovs_factor;
+                                egui::ComboBox::from_id_salt("standalone_mlc_ovs")
+                                    .width(70.0)
+                                    .selected_text(ovs_factor_label(ovs))
                                     .show_ui(ui, |ui| {
-                                        for clip in ClipType::ALL {
-                                            ui.selectable_value(
-                                                &mut clip_type,
-                                                clip,
-                                                clip.label(),
-                                            );
+                                        for v in 0..=2 {
+                                            ui.selectable_value(&mut ovs, v, ovs_factor_label(v));
                                         }
                                     });
-                                if clip_type != snap_ui.mlc_clip_type {
+                                if ovs != snap_ui.mlc_ovs_factor {
                                     changed = true;
                                     if let Ok(mut st) = self.standalone_state.lock() {
-                                        st.mlc_clip_type = clip_type;
+                                        st.mlc_ovs_factor = ovs;
                                     }
                                 }
                             });
@@ -2446,6 +2535,49 @@ impl eframe::App for StandaloneApp {
                         });
                     });
                     ui.group(|ui| {
+                        ui.label(egui::RichText::new("Clean Blend + Sag").strong());
+                        ui.vertical(|ui| {
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut ui_mlc_clean_blend, 0.0..=0.25)
+                                        .text("Dry"),
+                                )
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui
+                                .add(egui::Slider::new(&mut ui_mlc_sag, 0.0..=1.0).text("Sag"))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+                    });
+                    ui.group(|ui| {
+                        ui.label(egui::RichText::new("Chebyshev").strong());
+                        ui.vertical(|ui| {
+                            if ui
+                                .add(egui::Slider::new(&mut ui_mlc_h2, 0.0..=1.0).text("H2"))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui
+                                .add(egui::Slider::new(&mut ui_mlc_h3, 0.0..=1.0).text("H3"))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                            if ui
+                                .add(egui::Slider::new(&mut ui_mlc_h4, 0.0..=1.0).text("H4"))
+                                .changed()
+                            {
+                                changed = true;
+                            }
+                        });
+                    });
+                    ui.group(|ui| {
                         ui.label(egui::RichText::new("Gate").strong());
                         ui.vertical(|ui| {
                             ui.label("Threshold");
@@ -2542,6 +2674,11 @@ impl eframe::App for StandaloneApp {
                         st.mlc_asymmetry = ui_mlc_asymmetry;
                         st.mlc_preshape_tight = ui_mlc_preshape_tight;
                         st.mlc_preshape_bite = ui_mlc_preshape_bite;
+                        st.mlc_clean_blend = ui_mlc_clean_blend;
+                        st.mlc_sag = ui_mlc_sag;
+                        st.mlc_h2 = ui_mlc_h2;
+                        st.mlc_h3 = ui_mlc_h3;
+                        st.mlc_h4 = ui_mlc_h4;
                         st.limiter_enable = ui_limiter_enable;
                         st.limiter_ceiling = ui_limiter_ceiling;
                         st.limiter_release = ui_limiter_release;

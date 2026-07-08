@@ -46,9 +46,9 @@ pub enum MlcGatePos {
     Post,
 }
 
-/// Selectable clipping / saturation curve for the MLC ZERO V gain stages.
-/// The integer index (0-1) is passed to the Faust `clip_type` parameter and
-/// must stay in sync with the `clip()` selector in `dsp/mlc_zero_v.dsp`.
+/// Selectable clipping / saturation curve for a MLC ZERO V gain stage.
+/// The integer index (0-2) is passed to the Faust `Clip Type N` parameters and
+/// must stay in sync with the `clip_sel()` selector in `dsp/mlc_zero_v.dsp`.
 #[derive(Enum, PartialEq, Eq, Clone, Copy, Debug, Default)]
 pub enum ClipType {
     #[default]
@@ -56,17 +56,24 @@ pub enum ClipType {
     AsymmetricTanh,
     #[name = "Exponential"]
     Exponential,
+    #[name = "Chebyshev"]
+    Chebyshev,
 }
 
 impl ClipType {
-    /// Both curves in DSP index order.
-    pub const ALL: [ClipType; 2] = [ClipType::AsymmetricTanh, ClipType::Exponential];
+    /// All curves in DSP index order.
+    pub const ALL: [ClipType; 3] = [
+        ClipType::AsymmetricTanh,
+        ClipType::Exponential,
+        ClipType::Chebyshev,
+    ];
 
-    /// DSP selector index (0-1) passed to the Faust `Clip Type` parameter.
+    /// DSP selector index (0-2) passed to the Faust `Clip Type N` parameter.
     pub fn as_f32(self) -> f32 {
         match self {
             ClipType::AsymmetricTanh => 0.0,
             ClipType::Exponential => 1.0,
+            ClipType::Chebyshev => 2.0,
         }
     }
 
@@ -75,6 +82,7 @@ impl ClipType {
         match self {
             ClipType::AsymmetricTanh => "Asymmetric Tanh",
             ClipType::Exponential => "Exponential",
+            ClipType::Chebyshev => "Chebyshev",
         }
     }
 
@@ -87,7 +95,19 @@ impl ClipType {
             ClipType::Exponential => {
                 "Exponential — Muito agressivo. Timbre de pedal RAT/DS-1."
             }
+            ClipType::Chebyshev => {
+                "Chebyshev — Gerador explícito de harmônicos (H2/H3/H4). Brilho e mordida controláveis."
+            }
         }
+    }
+}
+
+/// Map the `mlc_ovs_factor` IntParam value (0/1/2) to its display label.
+pub fn ovs_factor_label(value: i32) -> &'static str {
+    match value {
+        0 => "1x",
+        1 => "2x",
+        _ => "4x",
     }
 }
 
@@ -161,8 +181,34 @@ pub struct BaseIOParams {
     #[id = "mlc_gate_pos"]
     pub mlc_gate_pos: EnumParam<MlcGatePos>,
 
-    #[id = "mlc_clip_type"]
-    pub mlc_clip_type: EnumParam<ClipType>,
+    #[id = "mlc_clip_type1"]
+    pub mlc_clip_type1: EnumParam<ClipType>,
+
+    #[id = "mlc_clip_type2"]
+    pub mlc_clip_type2: EnumParam<ClipType>,
+
+    #[id = "mlc_clip_type3"]
+    pub mlc_clip_type3: EnumParam<ClipType>,
+
+    /// Oversampling factor (0 = 1x, 1 = 2x, 2 = 4x). Handled Rust-side in the
+    /// bridge; adds plugin latency reported via PDC.
+    #[id = "mlc_ovs"]
+    pub mlc_ovs_factor: IntParam,
+
+    #[id = "mlc_clean_blend"]
+    pub mlc_clean_blend: FloatParam,
+
+    #[id = "mlc_sag"]
+    pub mlc_sag: FloatParam,
+
+    #[id = "mlc_h2"]
+    pub mlc_h2: FloatParam,
+
+    #[id = "mlc_h3"]
+    pub mlc_h3: FloatParam,
+
+    #[id = "mlc_h4"]
+    pub mlc_h4: FloatParam,
 
     #[id = "mlc_tight"]
     pub mlc_tight: BoolParam,
@@ -443,7 +489,52 @@ impl Default for BaseIOParams {
             mlc_warclaw: BoolParam::new("MLC WARCLAW", false),
             mlc_feedback: EnumParam::new("MLC Feedback", MlcFeedback::Hi),
             mlc_gate_pos: EnumParam::new("MLC Gate Pos", MlcGatePos::Pre),
-            mlc_clip_type: EnumParam::new("MLC Clip Type", ClipType::AsymmetricTanh),
+            mlc_clip_type1: EnumParam::new("MLC Clip Type 1", ClipType::AsymmetricTanh),
+            mlc_clip_type2: EnumParam::new("MLC Clip Type 2", ClipType::AsymmetricTanh),
+            mlc_clip_type3: EnumParam::new("MLC Clip Type 3", ClipType::Exponential),
+
+            mlc_ovs_factor: IntParam::new(
+                "MLC Oversampling",
+                0,
+                IntRange::Linear { min: 0, max: 2 },
+            )
+            .with_value_to_string(std::sync::Arc::new(|v| ovs_factor_label(v).to_string())),
+
+            mlc_clean_blend: FloatParam::new(
+                "MLC Clean Blend",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 0.25 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_sag: FloatParam::new(
+                "MLC Sag",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_h2: FloatParam::new(
+                "MLC Chebyshev H2",
+                0.0,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_h3: FloatParam::new(
+                "MLC Chebyshev H3",
+                0.7,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
+            mlc_h4: FloatParam::new(
+                "MLC Chebyshev H4",
+                0.2,
+                FloatRange::Linear { min: 0.0, max: 1.0 },
+            )
+            .with_smoother(SmoothingStyle::Linear(50.0))
+            .with_value_to_string(formatters::v2s_f32_rounded(2)),
 
             mlc_tight: BoolParam::new("Tight", true),
             mlc_asymmetry_enable: BoolParam::new("Asymmetry Enable", true),

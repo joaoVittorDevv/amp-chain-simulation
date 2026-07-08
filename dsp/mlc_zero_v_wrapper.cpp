@@ -117,7 +117,14 @@ void mlc_zero_v_set_m45(FaustHandle handle, float value) { MLC_SET_PARAM("M45", 
 void mlc_zero_v_set_warclaw(FaustHandle handle, float value) { MLC_SET_PARAM("WARCLAW", value); }
 void mlc_zero_v_set_feedback(FaustHandle handle, float value) { MLC_SET_PARAM("Feedback", value); }
 void mlc_zero_v_set_gate_pos(FaustHandle handle, float value) { MLC_SET_PARAM("Gate Pos", value); }
-void mlc_zero_v_set_clip_type(FaustHandle handle, float value) { MLC_SET_PARAM("Clip Type", value); }
+void mlc_zero_v_set_clip_type1(FaustHandle handle, float value) { MLC_SET_PARAM("Clip Type 1", value); }
+void mlc_zero_v_set_clip_type2(FaustHandle handle, float value) { MLC_SET_PARAM("Clip Type 2", value); }
+void mlc_zero_v_set_clip_type3(FaustHandle handle, float value) { MLC_SET_PARAM("Clip Type 3", value); }
+void mlc_zero_v_set_clean_blend(FaustHandle handle, float value) { MLC_SET_PARAM("Clean Blend", value); }
+void mlc_zero_v_set_sag(FaustHandle handle, float value) { MLC_SET_PARAM("Sag", value); }
+void mlc_zero_v_set_h2(FaustHandle handle, float value) { MLC_SET_PARAM("H2", value); }
+void mlc_zero_v_set_h3(FaustHandle handle, float value) { MLC_SET_PARAM("H3", value); }
+void mlc_zero_v_set_h4(FaustHandle handle, float value) { MLC_SET_PARAM("H4", value); }
 void mlc_zero_v_set_tight(FaustHandle handle, float value) { MLC_SET_PARAM("Tight", value); }
 void mlc_zero_v_set_asymmetry_enable(FaustHandle handle, float value) { MLC_SET_PARAM("Asymmetry Enable", value); }
 void mlc_zero_v_set_asymmetry(FaustHandle handle, float value) { MLC_SET_PARAM("Asymmetry", value); }

@@ -108,13 +108,21 @@ struct MlcBlockParams {
     warclaw: bool,
     feedback: f32,
     gate_pos: f32,
-    clip_type: f32,
+    clip_type1: f32,
+    clip_type2: f32,
+    clip_type3: f32,
     tight: f32,
     asymmetry_enable: f32,
     asymmetry: f32,
     preshape: f32,
     preshape_tight: f32,
     preshape_bite: f32,
+    clean_blend: f32,
+    sag: f32,
+    h2: f32,
+    h3: f32,
+    h4: f32,
+    ovs_factor: i32,
 }
 
 #[inline(always)]
@@ -132,13 +140,21 @@ fn configure_mlc(mlc: &mut MlcZeroVProcessor, params: MlcBlockParams) {
     mlc.set_warclaw(params.warclaw);
     mlc.set_feedback(params.feedback);
     mlc.set_gate_pos(params.gate_pos);
-    mlc.set_clip_type(params.clip_type);
+    mlc.set_clip_type1(params.clip_type1);
+    mlc.set_clip_type2(params.clip_type2);
+    mlc.set_clip_type3(params.clip_type3);
     mlc.set_tight(params.tight);
     mlc.set_asymmetry_enable(params.asymmetry_enable);
     mlc.set_asymmetry(params.asymmetry);
     mlc.set_preshape(params.preshape);
     mlc.set_preshape_tight(params.preshape_tight);
     mlc.set_preshape_bite(params.preshape_bite);
+    mlc.set_clean_blend(params.clean_blend);
+    mlc.set_sag(params.sag);
+    mlc.set_h2(params.h2);
+    mlc.set_h3(params.h3);
+    mlc.set_h4(params.h4);
+    mlc.set_ovs_factor(params.ovs_factor);
 }
 
 pub struct BaseIO {
@@ -882,7 +898,9 @@ impl Plugin for BaseIO {
                 MlcGatePos::Pre => 0.0,
                 MlcGatePos::Post => 1.0,
             },
-            clip_type: self.params.mlc_clip_type.value().as_f32(),
+            clip_type1: self.params.mlc_clip_type1.value().as_f32(),
+            clip_type2: self.params.mlc_clip_type2.value().as_f32(),
+            clip_type3: self.params.mlc_clip_type3.value().as_f32(),
             tight: if self.params.mlc_tight.value() { 1.0 } else { 0.0 },
             asymmetry_enable: if self.params.mlc_asymmetry_enable.value() {
                 1.0
@@ -897,6 +915,12 @@ impl Plugin for BaseIO {
             },
             preshape_tight: self.params.mlc_preshape_tight.smoothed.next(),
             preshape_bite: self.params.mlc_preshape_bite.smoothed.next(),
+            clean_blend: self.params.mlc_clean_blend.smoothed.next(),
+            sag: self.params.mlc_sag.smoothed.next(),
+            h2: self.params.mlc_h2.smoothed.next(),
+            h3: self.params.mlc_h3.smoothed.next(),
+            h4: self.params.mlc_h4.smoothed.next(),
+            ovs_factor: self.params.mlc_ovs_factor.value(),
         };
         let eq_active = self.params.eq_active.value();
         let eq_tanh_bypass = self.params.eq_tanh_bypass.value();
@@ -917,8 +941,15 @@ impl Plugin for BaseIO {
         let limiter_release = self.params.limiter_release.smoothed.next();
         let sample_rate = self.sample_rate;
 
-        // Mojo é síncrono e zero-copy — latência sempre 0 (sem PDC necessário)
-        _context.set_latency_samples(0);
+        // Mojo é síncrono e zero-copy — latência 0. A MLC ZERO V pode introduzir
+        // latência de PDC quando o oversampling Lanczos3 está ativo.
+        let mlc_latency = match amp_model {
+            AmpModel::MlcZeroV => self.mlc_zero_v[0]
+                .as_ref()
+                .map_or(0, |m| m.latency_samples()),
+            _ => 0,
+        };
+        _context.set_latency_samples(mlc_latency);
 
         // Apply mono / input routing FIRST before doing any DSP processing!
         for mut channel_samples in buffer.iter_samples() {

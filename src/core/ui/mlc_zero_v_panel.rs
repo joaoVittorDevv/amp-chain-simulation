@@ -174,15 +174,39 @@ fn gate_pos_switch(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<Ml
     }
 }
 
-fn clip_type_combo(ui: &mut egui::Ui, setter: &ParamSetter, param: &EnumParam<ClipType>) {
+fn clip_type_combo(
+    ui: &mut egui::Ui,
+    setter: &ParamSetter,
+    id: &str,
+    param: &EnumParam<ClipType>,
+) {
     let mut value = param.value();
-    egui::ComboBox::from_id_salt("mlc_clip_type_combo")
+    egui::ComboBox::from_id_salt(id)
         .width(130.0)
         .selected_text(value.label())
         .show_ui(ui, |ui| {
             for clip in ClipType::ALL {
                 ui.selectable_value(&mut value, clip, clip.label())
                     .on_hover_text(clip.description());
+            }
+        });
+    if value != param.value() {
+        setter.begin_set_parameter(param);
+        setter.set_parameter(param, value);
+        setter.end_set_parameter(param);
+    }
+}
+
+/// Combo for the oversampling `IntParam` (0 = 1x, 1 = 2x, 2 = 4x).
+fn ovs_combo(ui: &mut egui::Ui, setter: &ParamSetter, param: &nih_plug::prelude::IntParam) {
+    use crate::core::state::plugin_params::ovs_factor_label;
+    let mut value = param.value();
+    egui::ComboBox::from_id_salt("mlc_ovs_combo")
+        .width(70.0)
+        .selected_text(ovs_factor_label(value))
+        .show_ui(ui, |ui| {
+            for v in 0..=2 {
+                ui.selectable_value(&mut value, v, ovs_factor_label(v));
             }
         });
     if value != param.value() {
@@ -201,12 +225,50 @@ pub fn draw_mlc_zero_v_panel(ui: &mut egui::Ui, setter: &ParamSetter, params: &A
                 param_knob(ui, setter, "Master", &params.mlc_master);
                 ui.vertical(|ui| {
                     ui.label(
-                        egui::RichText::new("Clip")
+                        egui::RichText::new("Clip per stage")
                             .small()
                             .color(egui::Color32::GRAY),
                     );
-                    clip_type_combo(ui, setter, &params.mlc_clip_type);
+                    ui.horizontal(|ui| {
+                        ui.label("1");
+                        clip_type_combo(ui, setter, "mlc_clip1", &params.mlc_clip_type1);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("2");
+                        clip_type_combo(ui, setter, "mlc_clip2", &params.mlc_clip_type2);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("3");
+                        clip_type_combo(ui, setter, "mlc_clip3", &params.mlc_clip_type3);
+                    });
                 });
+            });
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Oversampling").strong());
+            ui.horizontal(|ui| {
+                ui.label("Rate");
+                ovs_combo(ui, setter, &params.mlc_ovs_factor);
+            });
+            ui.label(
+                egui::RichText::new("Lanczos3 anti-alias")
+                    .small()
+                    .color(egui::Color32::GRAY),
+            );
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Clean Blend").strong());
+            ui.vertical(|ui| {
+                param_slider(ui, setter, "Dry", &params.mlc_clean_blend);
+                param_slider(ui, setter, "Sag", &params.mlc_sag);
+            });
+        });
+        ui.group(|ui| {
+            ui.label(egui::RichText::new("Chebyshev").strong());
+            ui.vertical(|ui| {
+                param_slider(ui, setter, "H2", &params.mlc_h2);
+                param_slider(ui, setter, "H3", &params.mlc_h3);
+                param_slider(ui, setter, "H4", &params.mlc_h4);
             });
         });
         ui.group(|ui| {
