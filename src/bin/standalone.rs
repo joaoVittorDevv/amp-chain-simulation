@@ -6,13 +6,13 @@ use distortion::core::state::plugin_params::{
     AmpModel, ClipType, MlcAdaaOrder, MlcBright, MlcFeedback, MlcGatePos, MlcTab, MlcTsModel,
     MlcTubeModel,
 };
-use nih_plug::prelude::Enum;
 #[cfg(feature = "lab")]
 use distortion::core::ui::{draw_lab_panel, LabUiState};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
 #[cfg(feature = "lab")]
 use distortion::lab::Lab;
 use eframe::egui;
+use nih_plug::prelude::Enum;
 use rtrb::{Consumer, RingBuffer};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -516,9 +516,36 @@ fn audio_worker(
                     *cons_lock = Some(analyzer_consumer);
                 }
 
+                // The actual cpal callback block can exceed the UI slider's
+                // `buffer_size`: `strict_config.buffer_size` is left at
+                // `cpal::BufferSize::Default` below, so the OS/driver picks
+                // the real block size. Probe the input device's supported
+                // range up front so every buffer downstream (pipeline
+                // scratch space, playthrough ring buffer) is sized from what
+                // the device can actually deliver, not just the slider.
+                // Falls back to 8192 when the platform can't report a range
+                // (`SupportedBufferSize::Unknown`, e.g. some ALSA/PulseAudio
+                // paths).
+                let max_block: usize = input
+                    .as_ref()
+                    .and_then(|(raw_name, _, _)| {
+                        let host = cpal::host_from_id(host_id).ok()?;
+                        let device = host
+                            .input_devices()
+                            .ok()?
+                            .find(|d| d.name().unwrap_or_default() == *raw_name)?;
+                        let config = device.default_input_config().ok()?;
+                        match config.buffer_size() {
+                            cpal::SupportedBufferSize::Range { max, .. } => Some(*max as usize),
+                            cpal::SupportedBufferSize::Unknown => None,
+                        }
+                    })
+                    .unwrap_or(8192)
+                    .max(buffer_size as usize);
+
                 let has_both = input.is_some() && output.is_some();
                 let (mut pt_producer, mut pt_consumer) = if has_both {
-                    let (p, c) = RingBuffer::new((buffer_size * 8).max(2048) as usize);
+                    let (p, c) = RingBuffer::new((max_block * 8).max(2048));
                     (Some(p), Some(c))
                 } else {
                     (None, None)
@@ -546,12 +573,10 @@ fn audio_worker(
                                             // INICIALIZAÇÃO DSP: Fora do loop de processamento!
                                             // Pegamos o sample_rate do config e inicializamos uma única vez
                                             let s_rate = strict_config.sample_rate.0 as f32;
-                                            let max_block = buffer_size as usize;
 
                                             // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
                                             cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
-                                            cabinet_max_block
-                                                .store(max_block, Ordering::Relaxed);
+                                            cabinet_max_block.store(max_block, Ordering::Relaxed);
                                             {
                                                 // Resolver o IR ativo e publicar um runtime para este sample rate.
                                                 let mut hash = state_clone
@@ -574,9 +599,7 @@ fn audio_worker(
                                                             l.get_ir_by_hash(&hash)
                                                         {
                                                             if let Ok(rt) = CabinetRuntime::build(
-                                                                &bytes,
-                                                                s_rate,
-                                                                max_block,
+                                                                &bytes, s_rate, max_block,
                                                             ) {
                                                                 cabinet_mailbox.publish(rt);
                                                             }
@@ -586,8 +609,8 @@ fn audio_worker(
                                             }
 
                                             // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
-                                            let pre_eq_ir =
-                                                decode_wav_flat(DEFAULT_PRE_EQ_IR).unwrap_or_default();
+                                            let pre_eq_ir = decode_wav_flat(DEFAULT_PRE_EQ_IR)
+                                                .unwrap_or_default();
 
                                             let mut pipeline = StandalonePipeline::new(
                                                 s_rate,
@@ -597,8 +620,8 @@ fn audio_worker(
                                             );
 
                                             // Buffers temporários para processamento in-place em bloco
-                                            let mut buf_l = vec![0.0; buffer_size as usize];
-                                            let mut buf_r = vec![0.0; buffer_size as usize];
+                                            let mut buf_l = vec![0.0; max_block];
+                                            let mut buf_r = vec![0.0; max_block];
 
                                             device.build_input_stream(
                                                 &strict_config,
@@ -610,44 +633,57 @@ fn audio_worker(
                                                             AudioSnapshot::default()
                                                         });
 
-                                                    // 1. Extrair canais da interface para nossos buffers
-                                                    // Preenchemos buf_l e buf_r iterando sobre os frames do CPAL
+                                                    // Processa em blocos de no máximo `max_block`
+                                                    // (cap das buffers pré-alocadas do pipeline).
+                                                    // Sem isso, um bloco do driver maior que a
+                                                    // capacidade seria truncado silenciosamente:
+                                                    // `strict_config.buffer_size` fica em
+                                                    // `Default`, então o SO/driver escolhe o
+                                                    // tamanho real do callback, que pode exceder
+                                                    // o slider da UI.
                                                     let num_frames =
                                                         data.len() / (channels as usize);
-                                                    let max_len =
-                                                        num_frames.min(buffer_size as usize);
+                                                    let cap = buf_l.len();
 
-                                                    for (i, frame) in data
-                                                        .chunks(channels as usize)
-                                                        .enumerate()
-                                                        .take(max_len)
+                                                    for chunk_start in
+                                                        (0..num_frames).step_by(cap.max(1))
                                                     {
-                                                        buf_l[i] = frame
-                                                            .get(l_idx)
-                                                            .copied()
-                                                            .unwrap_or(0.0);
-                                                        buf_r[i] = frame
-                                                            .get(r_idx)
-                                                            .copied()
-                                                            .unwrap_or(0.0);
-                                                    }
+                                                        let max_len =
+                                                            (num_frames - chunk_start).min(cap);
 
-                                                    // 2. Processamento DSP em Bloco (Faust EQ, pre-EQ,
-                                                    // amp model + crossfade, cabinet, ganho master,
-                                                    // lab pipeline, limiter, saneamento NaN/Inf).
-                                                    pipeline.process(
-                                                        &mut buf_l[..max_len],
-                                                        &mut buf_r[..max_len],
-                                                        &snap,
-                                                    );
+                                                        for (i, frame) in data
+                                                            [chunk_start * channels as usize..]
+                                                            .chunks(channels as usize)
+                                                            .enumerate()
+                                                            .take(max_len)
+                                                        {
+                                                            buf_l[i] = frame
+                                                                .get(l_idx)
+                                                                .copied()
+                                                                .unwrap_or(0.0);
+                                                            buf_r[i] = frame
+                                                                .get(r_idx)
+                                                                .copied()
+                                                                .unwrap_or(0.0);
+                                                        }
 
-                                                    // 3. Enviar para Output da Interface e Analisador Gráfico
-                                                    for i in 0..max_len {
-                                                        let mix = (buf_l[i] + buf_r[i]) * 0.5;
-                                                        let _ = analyzer_producer.push(mix);
-                                                        if let Some(pp) = pt_producer.as_mut() {
-                                                            let _ = pp.push(buf_l[i]);
-                                                            let _ = pp.push(buf_r[i]);
+                                                        // 2. Processamento DSP em Bloco (Faust EQ, pre-EQ,
+                                                        // amp model + crossfade, cabinet, ganho master,
+                                                        // lab pipeline, limiter, saneamento NaN/Inf).
+                                                        pipeline.process(
+                                                            &mut buf_l[..max_len],
+                                                            &mut buf_r[..max_len],
+                                                            &snap,
+                                                        );
+
+                                                        // 3. Enviar para Output da Interface e Analisador Gráfico
+                                                        for i in 0..max_len {
+                                                            let mix = (buf_l[i] + buf_r[i]) * 0.5;
+                                                            let _ = analyzer_producer.push(mix);
+                                                            if let Some(pp) = pt_producer.as_mut() {
+                                                                let _ = pp.push(buf_l[i]);
+                                                                let _ = pp.push(buf_r[i]);
+                                                            }
                                                         }
                                                     }
                                                 },
@@ -2312,31 +2348,28 @@ impl eframe::App for StandaloneApp {
                     }
                     // --- Tier 2.2 / 3.x controls ---
                     // Compact knob helper (value passed by ref, `changed` flag by ref).
-                    let add_knob =
-                        |ui: &mut egui::Ui,
-                         label: &str,
-                         val: &mut f32,
-                         lo: f32,
-                         hi: f32,
-                         unit: &str,
-                         ch: &mut bool| {
-                            ui.vertical(|ui| {
-                                ui.label(label);
-                                if ui
-                                    .add(
-                                        Knob::new(val, lo, hi, KnobStyle::Wiper).with_size(45.0),
-                                    )
-                                    .changed()
-                                {
-                                    *ch = true;
-                                }
-                                ui.label(
-                                    egui::RichText::new(format!("{:.1}{}", *val, unit))
-                                        .small()
-                                        .monospace(),
-                                );
-                            });
-                        };
+                    let add_knob = |ui: &mut egui::Ui,
+                                    label: &str,
+                                    val: &mut f32,
+                                    lo: f32,
+                                    hi: f32,
+                                    unit: &str,
+                                    ch: &mut bool| {
+                        ui.vertical(|ui| {
+                            ui.label(label);
+                            if ui
+                                .add(Knob::new(val, lo, hi, KnobStyle::Wiper).with_size(45.0))
+                                .changed()
+                            {
+                                *ch = true;
+                            }
+                            ui.label(
+                                egui::RichText::new(format!("{:.1}{}", *val, unit))
+                                    .small()
+                                    .monospace(),
+                            );
+                        });
+                    };
 
                     if ui_mlc_tab == MlcTab::Tone {
                         ui.group(|ui| {
@@ -2377,10 +2410,7 @@ impl eframe::App for StandaloneApp {
                                     egui::ComboBox::from_id_salt("standalone_mlc_tube_model")
                                         .width(110.0)
                                         .selected_text(
-                                            names
-                                                .get(tube_model.to_index())
-                                                .copied()
-                                                .unwrap_or(""),
+                                            names.get(tube_model.to_index()).copied().unwrap_or(""),
                                         )
                                         .show_ui(ui, |ui| {
                                             for (i, name) in names.iter().enumerate() {
