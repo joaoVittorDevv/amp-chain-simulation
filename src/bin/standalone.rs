@@ -1238,16 +1238,19 @@ fn audio_worker(
                                             &strict_config,
                                             move |data: &mut [i16], _: &_| {
                                                 for frame in data.chunks_mut(channels as usize) {
-                                                    let l_sample = match pt_consumer.as_mut() {
-                                                        Some(pc) => pc.pop().unwrap_or(0.0),
-                                                        None => 0.0,
-                                                    };
-                                                    let pcm = (l_sample * i16::MAX as f32) as i16;
+                                                    let (l_sample, r_sample) =
+                                                        match pt_consumer.as_mut() {
+                                                            Some(pc) => (
+                                                                pc.pop().unwrap_or(0.0),
+                                                                pc.pop().unwrap_or(0.0),
+                                                            ),
+                                                            None => (0.0, 0.0),
+                                                        };
                                                     if let Some(l) = frame.get_mut(l_idx) {
-                                                        *l = pcm;
+                                                        *l = (l_sample * i16::MAX as f32) as i16;
                                                     }
                                                     if let Some(r) = frame.get_mut(r_idx) {
-                                                        *r = pcm;
+                                                        *r = (r_sample * i16::MAX as f32) as i16;
                                                     }
                                                 }
                                             },
