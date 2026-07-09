@@ -1,7 +1,10 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
-use distortion::core::dsp::{AnalyzerDsp, AudioSnapshot, StandalonePipeline, FFT_SIZE};
+use distortion::core::dsp::{
+    process_interleaved_block, sample_convert, AnalyzerDsp, AudioSnapshot, StandalonePipeline,
+    FFT_SIZE,
+};
 use distortion::core::state::plugin_params::{
     AmpModel, ClipType, MlcAdaaOrder, MlcBright, MlcFeedback, MlcGatePos, MlcTab, MlcTsModel,
     MlcTubeModel,
@@ -568,133 +571,160 @@ fn audio_worker(
                                     let l_idx = left.min((channels.saturating_sub(1)) as usize);
                                     let r_idx = right.min((channels.saturating_sub(1)) as usize);
 
-                                    let stream_res = match config.sample_format() {
-                                        cpal::SampleFormat::F32 => {
-                                            // INICIALIZAÇÃO DSP: Fora do loop de processamento!
-                                            // Pegamos o sample_rate do config e inicializamos uma única vez
-                                            let s_rate = strict_config.sample_rate.0 as f32;
+                                    // INICIALIZAÇÃO DSP: Fora do loop de processamento! Comum aos
+                                    // três formatos nativos suportados (F32/I32/I16, T15) — cada
+                                    // um só difere na conversão de amostra usada ao desinterlear
+                                    // (sample_convert) e no tipo que o cpal exige no callback; a
+                                    // pipeline e os buffers de scratch são construídos uma única
+                                    // vez e movidos para dentro de qual braço for de fato
+                                    // utilizado.
+                                    let s_rate = strict_config.sample_rate.0 as f32;
 
-                                            // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
-                                            cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
-                                            cabinet_max_block.store(max_block, Ordering::Relaxed);
-                                            {
-                                                // Resolver o IR ativo e publicar um runtime para este sample rate.
-                                                let mut hash = state_clone
-                                                    .lock()
-                                                    .ok()
-                                                    .map(|s| s.cab_active_hash.clone())
-                                                    .unwrap_or_default();
-                                                if hash.is_empty() {
-                                                    hash = cabinet_library
-                                                        .lock()
-                                                        .ok()
-                                                        .and_then(|l| {
-                                                            l.get_selected_hash().ok().flatten()
-                                                        })
-                                                        .unwrap_or_default();
-                                                }
-                                                if !hash.is_empty() {
-                                                    if let Ok(l) = cabinet_library.lock() {
-                                                        if let Ok((_, bytes)) =
-                                                            l.get_ir_by_hash(&hash)
-                                                        {
-                                                            if let Ok(rt) = CabinetRuntime::build(
-                                                                &bytes, s_rate, max_block,
-                                                            ) {
-                                                                cabinet_mailbox.publish(rt);
-                                                            }
-                                                        }
+                                    // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
+                                    cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
+                                    cabinet_max_block.store(max_block, Ordering::Relaxed);
+                                    {
+                                        // Resolver o IR ativo e publicar um runtime para este sample rate.
+                                        let mut hash = state_clone
+                                            .lock()
+                                            .ok()
+                                            .map(|s| s.cab_active_hash.clone())
+                                            .unwrap_or_default();
+                                        if hash.is_empty() {
+                                            hash = cabinet_library
+                                                .lock()
+                                                .ok()
+                                                .and_then(|l| l.get_selected_hash().ok().flatten())
+                                                .unwrap_or_default();
+                                        }
+                                        if !hash.is_empty() {
+                                            if let Ok(l) = cabinet_library.lock() {
+                                                if let Ok((_, bytes)) = l.get_ir_by_hash(&hash) {
+                                                    if let Ok(rt) = CabinetRuntime::build(
+                                                        &bytes, s_rate, max_block,
+                                                    ) {
+                                                        cabinet_mailbox.publish(rt);
                                                     }
                                                 }
                                             }
+                                        }
+                                    }
 
-                                            // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
-                                            let pre_eq_ir = decode_wav_flat(DEFAULT_PRE_EQ_IR)
-                                                .unwrap_or_default();
+                                    // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
+                                    let pre_eq_ir =
+                                        decode_wav_flat(DEFAULT_PRE_EQ_IR).unwrap_or_default();
 
-                                            let mut pipeline = StandalonePipeline::new(
-                                                s_rate,
-                                                max_block,
-                                                &pre_eq_ir,
-                                                cabinet_mailbox.clone(),
-                                            );
+                                    let mut pipeline = StandalonePipeline::new(
+                                        s_rate,
+                                        max_block,
+                                        &pre_eq_ir,
+                                        cabinet_mailbox.clone(),
+                                    );
 
-                                            // Buffers temporários para processamento in-place em bloco
-                                            let mut buf_l = vec![0.0; max_block];
-                                            let mut buf_r = vec![0.0; max_block];
+                                    // Buffers temporários para processamento in-place em bloco
+                                    let mut buf_l = vec![0.0; max_block];
+                                    let mut buf_r = vec![0.0; max_block];
+                                    let channels_usize = channels as usize;
 
-                                            device.build_input_stream(
-                                                &strict_config,
-                                                move |data: &[f32], _: &_| {
-                                                    let snap = state_clone
-                                                        .try_lock()
-                                                        .map(|g| g.audio())
-                                                        .unwrap_or_else(|_| {
-                                                            AudioSnapshot::default()
-                                                        });
-
-                                                    // Processa em blocos de no máximo `max_block`
-                                                    // (cap das buffers pré-alocadas do pipeline).
-                                                    // Sem isso, um bloco do driver maior que a
-                                                    // capacidade seria truncado silenciosamente:
-                                                    // `strict_config.buffer_size` fica em
-                                                    // `Default`, então o SO/driver escolhe o
-                                                    // tamanho real do callback, que pode exceder
-                                                    // o slider da UI.
-                                                    let num_frames =
-                                                        data.len() / (channels as usize);
-                                                    let cap = buf_l.len();
-
-                                                    for chunk_start in
-                                                        (0..num_frames).step_by(cap.max(1))
-                                                    {
-                                                        let max_len =
-                                                            (num_frames - chunk_start).min(cap);
-
-                                                        for (i, frame) in data
-                                                            [chunk_start * channels as usize..]
-                                                            .chunks(channels as usize)
-                                                            .enumerate()
-                                                            .take(max_len)
-                                                        {
-                                                            buf_l[i] = frame
-                                                                .get(l_idx)
-                                                                .copied()
-                                                                .unwrap_or(0.0);
-                                                            buf_r[i] = frame
-                                                                .get(r_idx)
-                                                                .copied()
-                                                                .unwrap_or(0.0);
-                                                        }
-
-                                                        // 2. Processamento DSP em Bloco (Faust EQ, pre-EQ,
-                                                        // amp model + crossfade, cabinet, ganho master,
-                                                        // lab pipeline, limiter, saneamento NaN/Inf).
-                                                        pipeline.process(
-                                                            &mut buf_l[..max_len],
-                                                            &mut buf_r[..max_len],
-                                                            &snap,
-                                                        );
-
-                                                        // 3. Enviar para Output da Interface e Analisador Gráfico
-                                                        for i in 0..max_len {
-                                                            let mix = (buf_l[i] + buf_r[i]) * 0.5;
+                                    let stream_res = match config.sample_format() {
+                                        cpal::SampleFormat::F32 => device.build_input_stream(
+                                            &strict_config,
+                                            move |data: &[f32], _: &_| {
+                                                let snap = state_clone
+                                                    .try_lock()
+                                                    .map(|g| g.audio())
+                                                    .unwrap_or_else(|_| AudioSnapshot::default());
+                                                process_interleaved_block(
+                                                    &mut pipeline,
+                                                    data,
+                                                    channels_usize,
+                                                    l_idx,
+                                                    r_idx,
+                                                    |s| s,
+                                                    &mut buf_l,
+                                                    &mut buf_r,
+                                                    &snap,
+                                                    |out_l, out_r| {
+                                                        for i in 0..out_l.len() {
+                                                            let mix = (out_l[i] + out_r[i]) * 0.5;
                                                             let _ = analyzer_producer.push(mix);
                                                             if let Some(pp) = pt_producer.as_mut() {
-                                                                let _ = pp.push(buf_l[i]);
-                                                                let _ = pp.push(buf_r[i]);
+                                                                let _ = pp.push(out_l[i]);
+                                                                let _ = pp.push(out_r[i]);
                                                             }
                                                         }
-                                                    }
-                                                },
-                                                |err| eprintln!("Input error: {:?}", err),
-                                                None,
-                                            )
-                                        }
-                                        // Non-F32 input formats are rejected explicitly rather than
-                                        // silently passed through DSP-free (which broke plugin/standalone
-                                        // parity). The whole DSP chain — Faust, Neural and Cabinet — runs
-                                        // in f32; select an F32-capable device/driver to enable it.
+                                                    },
+                                                );
+                                            },
+                                            |err| eprintln!("Input error: {:?}", err),
+                                            None,
+                                        ),
+                                        cpal::SampleFormat::I32 => device.build_input_stream(
+                                            &strict_config,
+                                            move |data: &[i32], _: &_| {
+                                                let snap = state_clone
+                                                    .try_lock()
+                                                    .map(|g| g.audio())
+                                                    .unwrap_or_else(|_| AudioSnapshot::default());
+                                                process_interleaved_block(
+                                                    &mut pipeline,
+                                                    data,
+                                                    channels_usize,
+                                                    l_idx,
+                                                    r_idx,
+                                                    sample_convert::i32_to_f32,
+                                                    &mut buf_l,
+                                                    &mut buf_r,
+                                                    &snap,
+                                                    |out_l, out_r| {
+                                                        for i in 0..out_l.len() {
+                                                            let mix = (out_l[i] + out_r[i]) * 0.5;
+                                                            let _ = analyzer_producer.push(mix);
+                                                            if let Some(pp) = pt_producer.as_mut() {
+                                                                let _ = pp.push(out_l[i]);
+                                                                let _ = pp.push(out_r[i]);
+                                                            }
+                                                        }
+                                                    },
+                                                );
+                                            },
+                                            |err| eprintln!("Input error: {:?}", err),
+                                            None,
+                                        ),
+                                        cpal::SampleFormat::I16 => device.build_input_stream(
+                                            &strict_config,
+                                            move |data: &[i16], _: &_| {
+                                                let snap = state_clone
+                                                    .try_lock()
+                                                    .map(|g| g.audio())
+                                                    .unwrap_or_else(|_| AudioSnapshot::default());
+                                                process_interleaved_block(
+                                                    &mut pipeline,
+                                                    data,
+                                                    channels_usize,
+                                                    l_idx,
+                                                    r_idx,
+                                                    sample_convert::i16_to_f32,
+                                                    &mut buf_l,
+                                                    &mut buf_r,
+                                                    &snap,
+                                                    |out_l, out_r| {
+                                                        for i in 0..out_l.len() {
+                                                            let mix = (out_l[i] + out_r[i]) * 0.5;
+                                                            let _ = analyzer_producer.push(mix);
+                                                            if let Some(pp) = pt_producer.as_mut() {
+                                                                let _ = pp.push(out_l[i]);
+                                                                let _ = pp.push(out_r[i]);
+                                                            }
+                                                        }
+                                                    },
+                                                );
+                                            },
+                                            |err| eprintln!("Input error: {:?}", err),
+                                            None,
+                                        ),
+                                        // Any other native format cpal could report is rejected
+                                        // explicitly rather than silently passed through DSP-free.
                                         _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
                                     };
 

@@ -10,8 +10,7 @@ use crate::bridge::{faust::FaustProcessor, ExternalProcessor, NeuralProcessor};
 use crate::core::cabinet::{CabinetEngine, CabinetMailbox};
 use crate::core::dsp::PeakLimiter;
 use crate::core::state::plugin_params::{
-    AmpModel, ClipType, MlcAdaaOrder, MlcBright, MlcFeedback, MlcGatePos, MlcTsModel,
-    MlcTubeModel,
+    AmpModel, ClipType, MlcAdaaOrder, MlcBright, MlcFeedback, MlcGatePos, MlcTsModel, MlcTubeModel,
 };
 use fft_convolver::FFTConvolver;
 use std::sync::Arc;
@@ -490,8 +489,7 @@ impl StandalonePipeline {
             }
 
             // ESTÁGIO 3: Modelo de amp selecionado
-            if snap.amp_model != self.previous_amp_model && self.crossfade_sample >= CROSSFADE_LEN
-            {
+            if snap.amp_model != self.previous_amp_model && self.crossfade_sample >= CROSSFADE_LEN {
                 self.crossfade_sample = 0;
             } else if snap.amp_model == self.previous_amp_model
                 && self.crossfade_sample < CROSSFADE_LEN
@@ -597,8 +595,11 @@ impl StandalonePipeline {
             // ESTÁGIO: Brickwall Limiter (após master
             // gain, antes do saneamento NaN).
             if snap.limiter_enable {
-                self.limiter
-                    .set_params(snap.limiter_ceiling, snap.limiter_release, self.sample_rate);
+                self.limiter.set_params(
+                    snap.limiter_ceiling,
+                    snap.limiter_release,
+                    self.sample_rate,
+                );
                 for l in &mut buf_l[..max_len] {
                     *l = self.limiter.process(*l);
                 }
@@ -619,5 +620,54 @@ impl StandalonePipeline {
                 *r = 0.0;
             }
         }
+    }
+}
+
+/// Deinterleaves one raw input block of native samples (F32/I32/I16 — any
+/// format `convert` can turn into f32), runs it through `pipeline` in
+/// `pipeline.max_block()`-sized chunks, and calls `on_chunk` once per chunk
+/// with the processed L/R slices.
+///
+/// This is the single call site `pipeline.process()` is reached from for
+/// every standalone input format arm (T15), so adding a new native format
+/// only means adding a `convert` function — never a second copy of the
+/// chunking loop or the DSP call. Decoupled from cpal/rtrb on purpose so it
+/// can be exercised directly in tests without a live audio device.
+#[allow(clippy::too_many_arguments)]
+pub fn process_interleaved_block<T: Copy>(
+    pipeline: &mut StandalonePipeline,
+    data: &[T],
+    channels: usize,
+    l_idx: usize,
+    r_idx: usize,
+    convert: impl Fn(T) -> f32,
+    buf_l: &mut [f32],
+    buf_r: &mut [f32],
+    snap: &AudioSnapshot,
+    mut on_chunk: impl FnMut(&[f32], &[f32]),
+) {
+    if channels == 0 {
+        return;
+    }
+    let num_frames = data.len() / channels;
+    let cap = buf_l.len().min(buf_r.len());
+    if cap == 0 {
+        return;
+    }
+
+    for chunk_start in (0..num_frames).step_by(cap) {
+        let max_len = (num_frames - chunk_start).min(cap);
+
+        for (i, frame) in data[chunk_start * channels..]
+            .chunks(channels)
+            .enumerate()
+            .take(max_len)
+        {
+            buf_l[i] = frame.get(l_idx).copied().map(&convert).unwrap_or(0.0);
+            buf_r[i] = frame.get(r_idx).copied().map(&convert).unwrap_or(0.0);
+        }
+
+        pipeline.process(&mut buf_l[..max_len], &mut buf_r[..max_len], snap);
+        on_chunk(&buf_l[..max_len], &buf_r[..max_len]);
     }
 }
