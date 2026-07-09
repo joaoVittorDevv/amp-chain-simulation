@@ -4,6 +4,8 @@ use distortion::core::audio_config::{
     pick_config, pick_full_duplex, PickedConfig, StreamDirection, FALLBACK_MAX_BLOCK,
 };
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
+use distortion::core::device_context::{DeviceContext, Direction};
+use distortion::core::device_identity::resolve_device;
 use distortion::core::dsp::{
     process_interleaved_block, sample_convert, AnalyzerDsp, AudioSnapshot, StandalonePipeline,
     FFT_SIZE,
@@ -329,20 +331,22 @@ fn save_persisted_hash(hash: &str) {
     }
 }
 
+/// A device the user routed audio through, identified well enough to be found
+/// again in a later enumeration. See `core::device_identity::resolve_device`.
 #[derive(Clone)]
-struct DeviceContext {
-    name: String,
+struct DeviceSelection {
     raw_name: String,
-    channels: u16,
-    sample_rate: u32,
+    enum_index: usize,
+    left: usize,
+    right: usize,
 }
 
 enum AudioCommand {
     RefreshDevices(cpal::HostId),
     ApplyRouting {
         host_id: cpal::HostId,
-        input: Option<(String, usize, usize)>,
-        output: Option<(String, usize, usize)>,
+        input: Option<DeviceSelection>,
+        output: Option<DeviceSelection>,
         buffer_size: u32,
     },
     Stop,
@@ -437,6 +441,69 @@ fn beautify_linux_name(raw: &str, is_input: bool) -> (String, bool) {
     (format!("{} (Cru)", raw), false)
 }
 
+/// One row of a device ComboBox. Returns `true` when the row was clicked.
+///
+/// A device the host cannot open stays on the list — greyed out, suffixed, and
+/// explaining itself on hover — rather than silently disappearing (CROSS-16).
+/// It is never selectable, so callers can assume a click means a usable device.
+fn device_entry(ui: &mut egui::Ui, dev: &DeviceContext, selected: bool) -> bool {
+    if dev.usable {
+        return ui.selectable_label(selected, &dev.name).clicked();
+    }
+
+    let reason = dev
+        .unusable_reason
+        .as_deref()
+        .unwrap_or("Dispositivo indisponível.");
+    let label = egui::SelectableLabel::new(false, format!("{} — indisponível", dev.name));
+    ui.add_enabled(false, label).on_disabled_hover_text(reason);
+    false
+}
+
+/// Distinct sample formats the host reports for `dev`, in enumeration order.
+///
+/// A host that refuses to enumerate ranges yields an empty list rather than an
+/// error: the formats only enrich the tooltip on an unusable device, so failing
+/// to read them must not itself hide the device.
+fn enumerate_sample_formats(dev: &cpal::Device, direction: Direction) -> Vec<cpal::SampleFormat> {
+    let ranges: Vec<cpal::SupportedStreamConfigRange> = if direction.is_input() {
+        dev.supported_input_configs()
+            .map(|it| it.collect())
+            .unwrap_or_default()
+    } else {
+        dev.supported_output_configs()
+            .map(|it| it.collect())
+            .unwrap_or_default()
+    };
+
+    let mut formats = Vec::new();
+    for range in ranges {
+        let format = range.sample_format();
+        if !formats.contains(&format) {
+            formats.push(format);
+        }
+    }
+    formats
+}
+
+/// Re-point a picker selection that a refresh invalidated.
+///
+/// Device lists are rebuilt from scratch on each refresh, so an index that named
+/// a working device can come back naming an unusable one — or naming nothing at
+/// all, if the list shrank. Routing already skips such a selection, but the
+/// picker would go on drawing it as selected, with channel controls sized from
+/// its now-zero channel count. Fall back to the first usable device, or to
+/// `None` when there is none.
+///
+/// An existing `None` is left alone: that is the user's "disabled" choice, not
+/// a stale index.
+fn revalidate_selection(selected: &mut Option<usize>, devices: &[DeviceContext]) {
+    let Some(idx) = *selected else { return };
+    if !devices.get(idx).is_some_and(|d| d.usable) {
+        *selected = devices.iter().position(|d| d.usable);
+    }
+}
+
 /// Resolve the single `Device` that ASIO's input and output streams must share (CROSS-15).
 ///
 /// An ASIO driver owns exactly one input/output stream pair behind a shared
@@ -450,8 +517,8 @@ fn beautify_linux_name(raw: &str, is_input: bool) -> (String, bool) {
 fn asio_duplex_device(
     host: &cpal::Host,
     host_id: cpal::HostId,
-    input: &Option<(String, usize, usize)>,
-    output: &Option<(String, usize, usize)>,
+    input: &Option<DeviceSelection>,
+    output: &Option<DeviceSelection>,
 ) -> Option<cpal::Device> {
     // `HostId::Asio` is only generated for `all(windows, feature = "asio")`, so the
     // body cannot even name it elsewhere.
@@ -460,8 +527,8 @@ fn asio_duplex_device(
         if host_id != cpal::HostId::Asio {
             return None;
         }
-        let (in_name, _, _) = input.as_ref()?;
-        let (out_name, _, _) = output.as_ref()?;
+        let in_name = &input.as_ref()?.raw_name;
+        let out_name = &output.as_ref()?.raw_name;
         if in_name != out_name {
             eprintln!(
                 "[Audio Engine] ASIO expõe um único device duplex; entrada {in_name:?} e \
@@ -504,56 +571,54 @@ fn audio_worker(
                 let mut outputs_list = vec![];
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
+                    // `enum_index` counts every device the host yields, including
+                    // those skipped below. It has to index the *unfiltered*
+                    // enumeration, because that is what `ApplyRouting` walks
+                    // when it looks the device back up.
                     if let Ok(devs) = host.input_devices() {
-                        for dev in devs {
-                            // Issue 4 fix: Use pick_config instead of default_input_config
-                            if let Ok(configs) = pick_config(&dev, StreamDirection::Input) {
-                                if let Some(picked) = configs.first() {
-                                    let config = &picked.config;
-                                    let raw_name =
-                                        dev.name().unwrap_or_else(|_| "Unknown Device".to_string());
-                                    let mut b_name = raw_name.clone();
-                                    if cfg!(target_os = "linux") {
-                                        let (n, _) = beautify_linux_name(&raw_name, true);
-                                        b_name = n;
-                                        if b_name.contains("(Ocultar)") {
-                                            continue;
-                                        }
-                                    }
-                                    inputs_list.push(DeviceContext {
-                                        name: b_name,
-                                        raw_name: raw_name.clone(),
-                                        channels: config.channels(),
-                                        sample_rate: config.sample_rate().0,
-                                    });
+                        for (enum_index, dev) in devs.enumerate() {
+                            let raw_name =
+                                dev.name().unwrap_or_else(|_| "Unknown Device".to_string());
+                            let mut b_name = raw_name.clone();
+                            if cfg!(target_os = "linux") {
+                                let (n, _) = beautify_linux_name(&raw_name, true);
+                                b_name = n;
+                                if b_name.contains("(Ocultar)") {
+                                    continue;
                                 }
                             }
+                            // A failing config no longer skips the device: it is listed
+                            // as unusable so the user sees it exists (CROSS-16).
+                            inputs_list.push(DeviceContext::from_config_result(
+                                b_name,
+                                raw_name,
+                                enum_index,
+                                Direction::Input,
+                                dev.default_input_config(),
+                                enumerate_sample_formats(&dev, Direction::Input),
+                            ));
                         }
                     }
                     if let Ok(devs) = host.output_devices() {
-                        for dev in devs {
-                            // Issue 4 fix: Use pick_config instead of default_output_config
-                            if let Ok(configs) = pick_config(&dev, StreamDirection::Output) {
-                                if let Some(picked) = configs.first() {
-                                    let config = &picked.config;
-                                    let raw_name =
-                                        dev.name().unwrap_or_else(|_| "Unknown Device".to_string());
-                                    let mut b_name = raw_name.clone();
-                                    if cfg!(target_os = "linux") {
-                                        let (n, _) = beautify_linux_name(&raw_name, false);
-                                        b_name = n;
-                                        if b_name.contains("(Ocultar)") {
-                                            continue;
-                                        }
-                                    }
-                                    outputs_list.push(DeviceContext {
-                                        name: b_name,
-                                        raw_name: raw_name.clone(),
-                                        channels: config.channels(),
-                                        sample_rate: config.sample_rate().0,
-                                    });
+                        for (enum_index, dev) in devs.enumerate() {
+                            let raw_name =
+                                dev.name().unwrap_or_else(|_| "Unknown Device".to_string());
+                            let mut b_name = raw_name.clone();
+                            if cfg!(target_os = "linux") {
+                                let (n, _) = beautify_linux_name(&raw_name, false);
+                                b_name = n;
+                                if b_name.contains("(Ocultar)") {
+                                    continue;
                                 }
                             }
+                            outputs_list.push(DeviceContext::from_config_result(
+                                b_name,
+                                raw_name,
+                                enum_index,
+                                Direction::Output,
+                                dev.default_output_config(),
+                                enumerate_sample_formats(&dev, Direction::Output),
+                            ));
                         }
                     }
                 }
@@ -589,17 +654,21 @@ fn audio_worker(
 
                 let host = cpal::host_from_id(host_id).ok();
                 let input_device = match (&host, input.as_ref()) {
-                    (Some(h), Some((raw_name, _, _))) => {
-                        h.input_devices().ok().and_then(|mut devs| {
-                            devs.find(|d| d.name().unwrap_or_default() == *raw_name)
+                    (Some(h), Some(sel)) => {
+                        h.input_devices().ok().and_then(|devs| {
+                            resolve_device(devs, sel.enum_index, &sel.raw_name, |d| {
+                                d.name().ok()
+                            })
                         })
                     }
                     _ => None,
                 };
                 let output_device = match (&host, output.as_ref()) {
-                    (Some(h), Some((raw_name, _, _))) => {
-                        h.output_devices().ok().and_then(|mut devs| {
-                            devs.find(|d| d.name().unwrap_or_default() == *raw_name)
+                    (Some(h), Some(sel)) => {
+                        h.output_devices().ok().and_then(|devs| {
+                            resolve_device(devs, sel.enum_index, &sel.raw_name, |d| {
+                                d.name().ok()
+                            })
                         })
                     }
                     _ => None,
@@ -667,7 +736,7 @@ fn audio_worker(
                 // Wrap analyzer_producer in Arc<Mutex<>> so it can be cloned for each config attempt
                 let analyzer_producer = Arc::new(Mutex::new(analyzer_producer));
 
-                if let (Some((_, left, right)), Some(device)) =
+                if let (Some(DeviceSelection { left, right, .. }), Some(device)) =
                     (input.as_ref(), input_device.as_ref())
                 {
                     let (left, right) = (*left, *right);
@@ -905,7 +974,7 @@ fn audio_worker(
                     }
                 }
 
-                if let (Some((_, left, right)), Some(device)) =
+                if let (Some(DeviceSelection { left, right, .. }), Some(device)) =
                     (output.as_ref(), output_device.as_ref())
                 {
                     let (left, right) = (*left, *right);
@@ -1155,9 +1224,15 @@ impl StandaloneApp {
                     self.available_inputs = inputs;
                     self.available_outputs = outputs;
 
-                    if !self.available_inputs.is_empty() && self.selected_input_idx.is_none() {
-                        self.selected_input_idx = Some(0);
+                    // Unusable devices are listed but never auto-selected.
+                    if self.selected_input_idx.is_none() {
+                        self.selected_input_idx =
+                            self.available_inputs.iter().position(|d| d.usable);
                     }
+                    // The refresh may have replaced either selection with an
+                    // unusable device, or dropped it from the list entirely.
+                    revalidate_selection(&mut self.selected_input_idx, &self.available_inputs);
+                    revalidate_selection(&mut self.selected_output_idx, &self.available_outputs);
                     self.apply_audio_routing();
                 }
                 AudioEvent::StreamStarted(res) => {
@@ -1187,15 +1262,22 @@ impl StandaloneApp {
     fn apply_audio_routing(&mut self) {
         self.sample_rate_warning = None;
 
+        // `.filter(usable)` guards the case where a stale index, or a device that
+        // became unusable across a refresh, still sits in `selected_*_idx`.
         let input_params = if let Some(idx) = self.selected_input_idx {
-            if let Some(dev_ctx) = self.available_inputs.get(idx) {
+            if let Some(dev_ctx) = self.available_inputs.get(idx).filter(|d| d.usable) {
                 self.input_left = self
                     .input_left
                     .min((dev_ctx.channels.saturating_sub(1)) as usize);
                 self.input_right = self
                     .input_right
                     .min((dev_ctx.channels.saturating_sub(1)) as usize);
-                Some((dev_ctx.raw_name.clone(), self.input_left, self.input_right))
+                Some(DeviceSelection {
+                    raw_name: dev_ctx.raw_name.clone(),
+                    enum_index: dev_ctx.enum_index,
+                    left: self.input_left,
+                    right: self.input_right,
+                })
             } else {
                 None
             }
@@ -1204,18 +1286,19 @@ impl StandaloneApp {
         };
 
         let output_params = if let Some(idx) = self.selected_output_idx {
-            if let Some(dev_ctx) = self.available_outputs.get(idx) {
+            if let Some(dev_ctx) = self.available_outputs.get(idx).filter(|d| d.usable) {
                 self.output_left = self
                     .output_left
                     .min((dev_ctx.channels.saturating_sub(1)) as usize);
                 self.output_right = self
                     .output_right
                     .min((dev_ctx.channels.saturating_sub(1)) as usize);
-                Some((
-                    dev_ctx.raw_name.clone(),
-                    self.output_left,
-                    self.output_right,
-                ))
+                Some(DeviceSelection {
+                    raw_name: dev_ctx.raw_name.clone(),
+                    enum_index: dev_ctx.enum_index,
+                    left: self.output_left,
+                    right: self.output_right,
+                })
             } else {
                 None
             }
@@ -1225,9 +1308,11 @@ impl StandaloneApp {
 
         // Checar Mismatch de Sample Rate
         if let (Some(in_idx), Some(out_idx)) = (self.selected_input_idx, self.selected_output_idx) {
+            // Unusable devices carry `sample_rate == 0`; comparing that would raise
+            // a bogus mismatch warning.
             if let (Some(in_dev), Some(out_dev)) = (
-                self.available_inputs.get(in_idx),
-                self.available_outputs.get(out_idx),
+                self.available_inputs.get(in_idx).filter(|d| d.usable),
+                self.available_outputs.get(out_idx).filter(|d| d.usable),
             ) {
                 if in_dev.sample_rate != out_dev.sample_rate {
                     self.sample_rate_warning = Some(format!(
@@ -1372,7 +1457,7 @@ impl eframe::App for StandaloneApp {
                                     route_changed = true;
                                 }
                                 for (idx, dev) in self.available_inputs.iter().enumerate() {
-                                    if ui.selectable_label(self.selected_input_idx == Some(idx), &dev.name).clicked() {
+                                    if device_entry(ui, dev, self.selected_input_idx == Some(idx)) {
                                         self.selected_input_idx = Some(idx);
                                         route_changed = true;
                                     }
@@ -1442,7 +1527,7 @@ impl eframe::App for StandaloneApp {
                                     route_changed = true;
                                 }
                                 for (idx, dev) in self.available_outputs.iter().enumerate() {
-                                    if ui.selectable_label(self.selected_output_idx == Some(idx), &dev.name).clicked() {
+                                    if device_entry(ui, dev, self.selected_output_idx == Some(idx)) {
                                         self.selected_output_idx = Some(idx);
                                         route_changed = true;
                                     }
