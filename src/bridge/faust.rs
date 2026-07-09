@@ -313,6 +313,7 @@ fn faust_eq_param_metadata() -> Vec<ParameterMeta> {
         unit: unit.map(str::to_string),
         smoothing: "50 ms".to_string(),
         index: index as u32,
+        backend: None,
     })
     .collect()
 }

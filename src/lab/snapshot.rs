@@ -33,6 +33,10 @@ pub struct ParameterMeta {
     pub smoothing: String,
     /// Stable parameter index.
     pub index: u32,
+    /// Which backend produced this parameter (`"mojo"` | `"rust"`), when applicable.
+    /// In-memory only — never persisted in snapshots or the lab database.
+    #[serde(skip, default)]
+    pub backend: Option<&'static str>,
 }
 
 /// Database metadata for a saved snapshot.

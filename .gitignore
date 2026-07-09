@@ -42,6 +42,11 @@ Desktop.ini
 .directory
 *~
 
+# --- Neural backend artifacts (build.rs-generated, per target OS) ---
+neural/*.so
+neural/*.dylib
+neural/*.dll
+
 # --- Project Specific Defaults ---
 # Local/temporary testing files from the current project
 /debug/

@@ -11,7 +11,7 @@ pub mod core;
 pub mod lab;
 
 use crate::bridge::{
-    faust::FaustProcessor, mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, ExternalProcessor,
+    faust::FaustProcessor, mlc_zero_v::MlcZeroVProcessor, ExternalProcessor, NeuralProcessor,
 };
 use crate::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetRuntime};
 use crate::core::ui::ActivePanel;
@@ -194,7 +194,7 @@ pub struct BaseIO {
     faust: [Option<FaustProcessor>; 2],
     /// Processador neural principal.
     /// Executa saturação suave (tanh) in-place via FFI Zero-Copy.
-    mojo: [Option<MojoProcessor>; 2],
+    mojo: [Option<NeuralProcessor>; 2],
     mlc_zero_v: [Option<MlcZeroVProcessor>; 2],
     previous_amp_model: AmpModel,
     crossfade_sample: usize,
@@ -236,7 +236,7 @@ impl Default for BaseIO {
             analyzer_consumer: Arc::new(Mutex::new(Some(consumer))),
             analyzer_producer: producer,
             faust: [FaustProcessor::new(), FaustProcessor::new()],
-            mojo: [Some(MojoProcessor::new()), Some(MojoProcessor::new())],
+            mojo: [Some(NeuralProcessor::new()), Some(NeuralProcessor::new())],
             mlc_zero_v: [MlcZeroVProcessor::new(), MlcZeroVProcessor::new()],
             previous_amp_model: AmpModel::Neural,
             crossfade_sample: CROSSFADE_LEN,

@@ -289,12 +289,12 @@ const DEFAULT_VARIANT_SEEDS: &[DefaultVariantSeed] = &[
         impl_id: crate::bridge::faust::FAUST_EQ_IMPL_ID,
     },
     DefaultVariantSeed {
-        id: crate::bridge::mojo::MOJO_NEURAL_IMPL_ID,
+        id: crate::bridge::MOJO_NEURAL_IMPL_ID,
         node_id: "node-amp-modeler",
         category_id: "amp-modeler",
         node_name: "Amp Modeler",
         name: "Mojo Neural",
-        impl_id: crate::bridge::mojo::MOJO_NEURAL_IMPL_ID,
+        impl_id: crate::bridge::MOJO_NEURAL_IMPL_ID,
     },
     DefaultVariantSeed {
         id: crate::bridge::mlc_zero_v::MLC_ZERO_V_IMPL_ID,
@@ -331,8 +331,8 @@ fn register_default_variants(registry: &mut VariantRegistry) {
         crate::bridge::faust::faust_eq_factory,
     );
     registry.register(
-        crate::bridge::mojo::MOJO_NEURAL_IMPL_ID,
-        crate::bridge::mojo::mojo_neural_factory,
+        crate::bridge::MOJO_NEURAL_IMPL_ID,
+        crate::bridge::mojo_neural_factory,
     );
     registry.register(
         crate::bridge::mlc_zero_v::MLC_ZERO_V_IMPL_ID,

@@ -649,6 +649,7 @@ mod tests {
                     unit: Some("linear".to_string()),
                     smoothing: "none".to_string(),
                     index: 0,
+                    backend: None,
                 }],
                 dsp: DspConfig {
                     engine: DspEngine::Faust,

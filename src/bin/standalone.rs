@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
-use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, mojo::MojoProcessor, ExternalProcessor};
+use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, ExternalProcessor, NeuralProcessor};
 use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
 use distortion::core::state::plugin_params::{
@@ -358,8 +358,8 @@ impl Default for AudioSnapshot {
 fn process_standalone_amp(
     amp_model: AmpModel,
     snap: &AudioSnapshot,
-    neural_amp_l: &mut MojoProcessor,
-    neural_amp_r: &mut MojoProcessor,
+    neural_amp_l: &mut NeuralProcessor,
+    neural_amp_r: &mut NeuralProcessor,
     mlc_l: &mut Option<MlcZeroVProcessor>,
     mlc_r: &mut Option<MlcZeroVProcessor>,
     buf_l: &mut [f32],
@@ -745,9 +745,9 @@ fn audio_worker(
                     (None, None)
                 };
 
-                // Processadores Neurais Mojo (L/R) — FFI Zero-Copy
-                let mut neural_amp_l = MojoProcessor::new();
-                let mut neural_amp_r = MojoProcessor::new();
+                // Processadores Neurais (L/R) — backend resolvido por capacidade (have_mojo)
+                let mut neural_amp_l = NeuralProcessor::new();
+                let mut neural_amp_r = NeuralProcessor::new();
                 neural_amp_l.init(44100.0);
                 neural_amp_r.init(44100.0);
                 neural_amp_l.set_drive(2.0);

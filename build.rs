@@ -18,6 +18,10 @@ fn main() {
     let dsp_dir = PathBuf::from("dsp");
     let include_dir = PathBuf::from("faust-ddsp");
 
+    // Declared unconditionally so `#[cfg(have_mojo)]` never triggers the
+    // `unexpected_cfgs` lint, regardless of whether the cfg is emitted below.
+    println!("cargo::rustc-check-cfg=cfg(have_mojo)");
+
     // ── Faust: main DSP ───────────────────────────────────────────────────────
     let main_dsp = dsp_dir.join("main.dsp");
     let main_hpp = dsp_dir.join("FaustModule.hpp");
@@ -31,30 +35,38 @@ fn main() {
     // ── Mojo: neural shared library ───────────────────────────────────────────
     let mojo_bin = find_mojo();
     let force_rust = env::var("DISTORTION_FORCE_RUST_NEURAL").is_ok();
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let lib_name = build_support::neural_lib_filename(&target_os);
+    let neural_out = PathBuf::from(format!("neural/{}", lib_name));
 
     if !force_rust {
         if let Some(ref bin) = mojo_bin {
             let src = PathBuf::from("neural/main.mojo");
-            let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-            let lib_name = build_support::neural_lib_filename(&target_os);
-            let out = PathBuf::from(format!("neural/{}", lib_name));
 
-            let needs_rebuild = !out.exists()
+            let needs_rebuild = !neural_out.exists()
                 || std::fs::metadata(&src)
                     .and_then(|m| m.modified())
                     .ok()
-                    .zip(std::fs::metadata(&out).and_then(|m| m.modified()).ok())
+                    .zip(
+                        std::fs::metadata(&neural_out)
+                            .and_then(|m| m.modified())
+                            .ok(),
+                    )
                     .map(|(s, o)| s > o)
                     .unwrap_or(true);
 
             if needs_rebuild {
                 println!("cargo:warning=Recompilando Mojo (.mojo -> {})...", lib_name);
-                if let Err(stderr) = compile_mojo(bin, &src, &out) {
+                if let Err(stderr) = compile_mojo(bin, &src, &neural_out) {
                     panic!("Erro na compilação do Mojo (main.mojo):\n{}", stderr);
                 }
             }
         }
     }
+
+    // `have_mojo` requires the toolchain to have been found, not forced off,
+    // AND the artifact to actually exist on disk — never inferred from intent.
+    let have_mojo = !force_rust && mojo_bin.is_some() && neural_out.exists();
 
     // ── C++ wrapper compilation ───────────────────────────────────────────────
     cc::Build::new()
@@ -97,12 +109,11 @@ fn main() {
     // ── Neural library linking ────────────────────────────────────────────────
     let neural_dir = format!("{}/neural", env::var("CARGO_MANIFEST_DIR").unwrap());
 
-    let have_mojo = !force_rust && mojo_bin.is_some();
     if have_mojo {
+        println!("cargo::rustc-cfg=have_mojo");
         println!("cargo:rustc-link-search=native={}", neural_dir);
         println!("cargo:rustc-link-lib=neural");
 
-        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
         if target_os == "linux" || target_os == "macos" {
             println!("cargo:rustc-link-arg=-Wl,-rpath,{}", neural_dir);
         }

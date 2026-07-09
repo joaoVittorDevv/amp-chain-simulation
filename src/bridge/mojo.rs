@@ -3,8 +3,6 @@ use super::ExternalProcessor;
 use crate::lab::{DspVariant, ParameterMeta};
 
 #[cfg(feature = "lab")]
-pub const MOJO_NEURAL_IMPL_ID: &str = "mojo-neural";
-#[cfg(feature = "lab")]
 pub const MOJO_NEURAL_PARAM_IDS: [&str; 2] = ["drive", "output_gain"];
 
 // Define as interfaces C que a biblioteca do Mojo deverá expor (.so / .dylib)
@@ -131,13 +129,6 @@ impl DspVariant for MojoProcessor {
 }
 
 #[cfg(feature = "lab")]
-pub fn mojo_neural_factory(sample_rate: f32) -> Box<dyn DspVariant> {
-    let mut processor = MojoProcessor::new();
-    processor.init(sample_rate);
-    Box::new(processor)
-}
-
-#[cfg(feature = "lab")]
 fn mojo_param_metadata() -> Vec<ParameterMeta> {
     [
         ("drive", "Drive", (0.0, 1.0), 1.0),
@@ -154,6 +145,7 @@ fn mojo_param_metadata() -> Vec<ParameterMeta> {
         unit: None,
         smoothing: "50 ms".to_string(),
         index: index as u32,
+        backend: Some("mojo"),
     })
     .collect()
 }

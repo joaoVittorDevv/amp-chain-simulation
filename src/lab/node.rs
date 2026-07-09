@@ -103,11 +103,11 @@ impl Node {
             Some(factory) => self.request_switch(variant_id, factory, sample_rate),
             None => {
                 let error = format!("variant implementation '{impl_id}' is not registered");
-                self.load_state = NodeLoadState::Failed {
-                    variant_id,
-                    error: error.clone(),
-                };
-                Err(LabError::InvalidData(error))
+                eprintln!("[Lab] unknown variant impl '{impl_id}' for node '{}' — falling back to passthrough: {error}", self.id);
+                self.slot.mailbox().clear();
+                self.active_variant_id = Some(variant_id.clone());
+                self.load_state = NodeLoadState::Active { variant_id };
+                Ok(())
             }
         }
     }
@@ -211,20 +211,51 @@ mod tests {
     }
 
     #[test]
-    fn node_reports_registry_miss_without_clearing_active_variant() {
+    fn node_falls_back_to_passthrough_on_unknown_impl() {
+        let registry = VariantRegistry::new();
+        let mut node = Node::new("node-eq", "eq");
+
+        node.request_switch_from_registry("variant-missing", "missing_impl", &registry, 48_000.0)
+            .expect("unknown impl should fall back to passthrough, not error");
+        node.collect_mailbox();
+
+        let mut buffer = [1.0, 2.0];
+        node.process_block(buffer.as_mut_ptr(), buffer.len());
+
+        assert_eq!(buffer, [1.0, 2.0]);
+        assert_eq!(node.active_variant_id(), Some("variant-missing"));
+        assert_eq!(
+            node.load_state(),
+            &NodeLoadState::Active {
+                variant_id: "variant-missing".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn node_switching_to_unknown_impl_replaces_active_variant_with_passthrough() {
         let mut registry = VariantRegistry::new();
         registry.register("ok_impl", factory as VariantFactory);
         let mut node = Node::new("node-eq", "eq");
         node.request_switch_from_registry("variant-eq", "ok_impl", &registry, 48_000.0)
             .expect("first switch");
+        node.collect_mailbox();
 
-        let err = node
-            .request_switch_from_registry("missing", "missing_impl", &registry, 48_000.0)
-            .expect_err("missing impl");
+        node.request_switch_from_registry("variant-missing", "missing_impl", &registry, 48_000.0)
+            .expect("unknown impl should fall back to passthrough, not error");
+        node.collect_mailbox();
 
-        assert!(err.to_string().contains("missing_impl"));
-        assert_eq!(node.active_variant_id(), Some("variant-eq"));
-        assert!(matches!(node.load_state(), NodeLoadState::Failed { .. }));
+        let mut buffer = [1.0, 2.0];
+        node.process_block(buffer.as_mut_ptr(), buffer.len());
+
+        assert_eq!(buffer, [1.0, 2.0]);
+        assert_eq!(node.active_variant_id(), Some("variant-missing"));
+        assert_eq!(
+            node.load_state(),
+            &NodeLoadState::Active {
+                variant_id: "variant-missing".to_string()
+            }
+        );
     }
 
     #[test]
