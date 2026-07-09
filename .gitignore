@@ -5,9 +5,8 @@ target/
 **/*.rs.bk
 # Error log files
 cargo-debug/
-# Local Cargo config (authentication, custom paths)
-.cargo/config
-.cargo/config.toml
+# Local Cargo config (authentication only — config.toml with aliases is tracked)
+.cargo/credentials.toml
 
 # --- Python ---
 __pycache__/

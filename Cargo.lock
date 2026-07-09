@@ -807,6 +807,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "build-support"
+version = "0.1.0"
+dependencies = [
+ "filetime",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1457,6 +1464,7 @@ dependencies = [
  "audioadapter-buffers",
  "bindgen 0.71.1",
  "blake3",
+ "build-support",
  "cc",
  "chrono",
  "cpal",
@@ -5831,6 +5839,7 @@ checksum = "3ae8337f8a065cfc972643663ea4279e04e7256de865aa66fe25cec5fb912d3f"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "build-support",
  "nih_plug_xtask",
 ]
 

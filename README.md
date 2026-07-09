@@ -92,37 +92,34 @@ O projeto combina três tecnologias em um único pipeline de processamento de á
 ### 2.1 Standalone — Debug e Desenvolvimento Rápido
 
 ```bash
-make run
+cargo xtask run   # canónico
+make run          # atalho Unix (delega ao xtask)
 ```
 
 **O que acontece internamente:**
-1. `make check-env` → executa `scripts/check_env.sh` para validar as dependências do sistema.
-2. `make build-faust` → transpila `dsp/main.dsp` para `dsp/FaustModule.hpp` se houver alterações.
-3. `make build-mojo` → compila `neural/main.mojo` para `neural/libneural.so`.
-4. `./scripts/run_standalone.sh` → inicia o host standalone com ALSA.
+1. `cargo xtask pre-build` → compila `dsp/*.dsp` → `.hpp` e `neural/main.mojo` → `.so` se necessário.
+2. `cargo run --release --bin standalone` com `LD_LIBRARY_PATH` configurado para `neural/`.
 
 ### 2.2 VST3 / CLAP — Distribuição para DAWs
 
 ```bash
-make bundle
+cargo xtask bundle distortion --release
+make bundle   # atalho Unix
 ```
-
-**O que acontece internamente:**
-1. Executa o mesmo `pre-build` (check-env → faust → mojo).
-2. `cargo xtask bundle distortion --release` → empacota o plugin nos formatos VST3 e CLAP.
 
 ### 2.3 Compilação Apenas (sem executar)
 
 ```bash
-make build
-# Equivale a: cargo build --release
+cargo xtask build   # canónico (pre-build + cargo build --release)
+make build          # atalho Unix
 ```
 
 ### 2.4 Limpeza Total
 
 ```bash
-make clean
-# Remove: target/, dsp/*.hpp, dsp/*.cpp gerados, neural/*.so
+cargo xtask clean   # canónico
+make clean          # atalho Unix
+# Remove: dsp/*.hpp, neural/libneural.*, target/
 ```
 
 ### 2.5 Component Lab Workflow
@@ -146,22 +143,20 @@ cargo run --release --bin standalone
 ### 2.6 Diagrama do Fluxo de Build
 
 ```
-make run / make bundle
+cargo xtask build / cargo xtask bundle   (make build / make bundle como atalho)
        │
        ▼
-  check-env (scripts/check_env.sh)
+  cargo xtask pre-build
        │
-       ├──► build-faust
-       │         └── faust -lang cpp -I faust-ddsp -i dsp/main.dsp -o dsp/FaustModule.hpp
+       ├──► faust -lang cpp -I faust-ddsp -i dsp/main.dsp -o dsp/FaustModule.hpp
+       ├──► faust -lang cpp -I faust-ddsp -i dsp/mlc_zero_v.dsp -o dsp/MlcZeroVModule.hpp
+       ├──► mojo build --emit shared-lib neural/main.mojo -o neural/libneural.so (se disponível)
        │
-       ├──► build-mojo
-       │         └── mojo build --emit shared-lib neural/main.mojo -o neural/libneural.so
-       │
-       └──► cargo build / cargo xtask bundle
+       └──► cargo build --release
                     └── build.rs:
                          ├── cc::Build  → compila wrapper.cpp → libfaust_dsp.a
                          ├── bindgen    → gera bindings_faust.rs
-                         └── rustc-link-lib=dylib=neural → linka libneural.so
+                         └── rustc-link-lib=neural → linka libneural.so
 ```
 
 ---
@@ -387,10 +382,10 @@ faust --version
 **A primeira ferramenta de diagnóstico é sempre:**
 
 ```bash
-bash scripts/check_env.sh
+cargo xtask check-env
 ```
 
-Este script valida todas as dependências do sistema (Faust, Mojo, Cargo, Rust) antes de qualquer build.
+Este comando valida todas as dependências do sistema (Faust, Mojo) antes de qualquer build.
 
 ---
 
@@ -417,28 +412,22 @@ cd meu-novo-plugin
 source .venv/bin/activate
 
 # 3. Valide o ambiente
-bash scripts/check_env.sh
+cargo xtask check-env
 
 # 4. Execute o pre-build (Faust + Mojo)
-make pre-build
+cargo xtask pre-build
 
 # 5. Inicie em modo Standalone para validação
-make run
+cargo xtask run
 
 # 6. Gere o bundle para DAW (VST3/CLAP)
-make bundle
+cargo xtask bundle distortion --release
 ```
 
 ### Variáveis de Ambiente
 
-O `Makefile` configura as seguintes variáveis automaticamente:
-
-```makefile
-MOJO_HOME  ?= $(HOME)/.modular/pkg/packages.modular.com_mojo
-LD_LIBRARY_PATH := $(MOJO_HOME)/lib:$(PWD)/neural:$(LD_LIBRARY_PATH)
-```
-
-Se o Mojo estiver instalado no `.venv` local, o `Makefile` e o `build.rs` detectam isso automaticamente via busca em:
+`cargo xtask run` configura `LD_LIBRARY_PATH` automaticamente para `neural/`.
+O `build-support` detecta o Mojo via busca em:
 1. `$PATH`
 2. `./.venv/bin/mojo`
 3. `~/.modular/pkg/packages.modular.com_mojo/bin/mojo`
@@ -460,5 +449,6 @@ Se o Mojo estiver instalado no `.venv` local, o `Makefile` e o `build.rs` detect
 | `neural/main.mojo` | Processamento neural em Mojo (fonte da verdade do neural) |
 | `neural/libneural.so` | Artefato compilado do Mojo (gerado pelo build, não versionado) |
 | `build.rs` | Orquestra: rebuild do Faust, rebuild do Mojo, cc::Build, bindgen, linking |
-| `Makefile` | Interface de comandos: `run`, `bundle`, `build`, `clean`, `pre-build` |
-| `scripts/check_env.sh` | Diagnóstico de dependências do ambiente |
+| `Makefile` | Fachada Unix — delega todos os alvos a `cargo xtask` |
+| `xtask/src/main.rs` | Verbos: `check-env`, `pre-build`, `build`, `run`, `clean`, `bundle` |
+| `build-support/` | Descoberta de toolchain e naming de artefactos cross-platform |

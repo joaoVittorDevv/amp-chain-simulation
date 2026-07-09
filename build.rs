@@ -1,55 +1,11 @@
 use std::env;
 use std::path::PathBuf;
-use std::process::Command;
 
-fn find_mojo_path() -> Option<PathBuf> {
-    // 1. Tenta no PATH
-    if let Ok(output) = Command::new("which").arg("mojo").output() {
-        if output.status.success() {
-            let path_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            return Some(PathBuf::from(path_str));
-        }
-    }
-
-    // 2. Tenta caminhos padrão do Modular e venv local
-    let home = env::var("HOME").ok().unwrap_or_default();
-    let common_paths = vec![
-        "./.venv/bin/mojo".to_string(),
-        format!("{}/.modular/pkg/packages.modular.com_mojo/bin/mojo", home),
-        format!("{}/.modular/bin/mojo", home),
-    ];
-
-    for path in common_paths {
-        let pb = PathBuf::from(path);
-        if pb.exists() {
-            return Some(pb);
-        }
-    }
-    None
-}
-
-fn pre_build_check() {
-    // Validação Faust
-    let faust_exists = Command::new("faust").arg("--version").output().is_ok();
-    if !faust_exists {
-        panic!("\n\n❌ ERRO: Transpilador Faust não encontrado.\nPor favor, instale o Faust (https://faust.grame.fr/) para continuar.\n\n");
-    }
-
-    // Validação Mojo (Busca Inteligente)
-    let mojo_bin = find_mojo_path().expect("\n\n❌ ERRO: Compilador Mojo não encontrado.\nCertifique-se de que o Mojo está instalado e acessível (https://www.modular.com/mojo).\n\n");
-
-    // Configura o link path do Mojo dinamicamente
-    if let Some(mojo_dir) = mojo_bin.parent() {
-        if let Some(lib_dir) = mojo_dir.parent().map(|p| p.join("lib")) {
-            if lib_dir.exists() {
-                println!("cargo:rustc-link-search=native={}", lib_dir.display());
-            }
-        }
-    }
-}
+use build_support::{compile_faust, compile_mojo, find_mojo, header_state, HeaderState};
 
 fn main() {
-    pre_build_check();
+    // Allow forced Rust neural backend (used by xtask bundle, CROSS-24).
+    println!("cargo:rerun-if-env-changed=DISTORTION_FORCE_RUST_NEURAL");
 
     println!("cargo:rerun-if-changed=dsp/wrapper.cpp");
     println!("cargo:rerun-if-changed=dsp/wrapper.h");
@@ -60,104 +16,47 @@ fn main() {
     println!("cargo:rerun-if-changed=neural/main.mojo");
 
     let dsp_dir = PathBuf::from("dsp");
+    let include_dir = PathBuf::from("faust-ddsp");
+
+    // ── Faust: main DSP ───────────────────────────────────────────────────────
     let main_dsp = dsp_dir.join("main.dsp");
+    let main_hpp = dsp_dir.join("FaustModule.hpp");
+    compile_dsp(&main_dsp, &main_hpp, "mydsp", &include_dir);
+
+    // ── Faust: MLC ZERO V ────────────────────────────────────────────────────
     let mlc_dsp = dsp_dir.join("mlc_zero_v.dsp");
-    let wrapper_h = dsp_dir.join("wrapper.h");
-    let mlc_wrapper_h = dsp_dir.join("mlc_zero_v_wrapper.h");
+    let mlc_hpp = dsp_dir.join("MlcZeroVModule.hpp");
+    compile_dsp(&mlc_dsp, &mlc_hpp, "mlczerov", &include_dir);
 
-    // Rebuild automático do Faust se .dsp existir e for alterado
-    if main_dsp.exists() {
-        let hpp_file = dsp_dir.join("FaustModule.hpp");
-        let should_rebuild = !hpp_file.exists()
-            || std::fs::metadata(&main_dsp).unwrap().modified().unwrap()
-                > std::fs::metadata(&hpp_file).unwrap().modified().unwrap();
+    // ── Mojo: neural shared library ───────────────────────────────────────────
+    let mojo_bin = find_mojo();
+    let force_rust = env::var("DISTORTION_FORCE_RUST_NEURAL").is_ok();
 
-        if should_rebuild {
-            println!("cargo:warning=Recompilando Faust (.dsp -> .hpp)...");
-            let status = Command::new("faust")
-                .args(&[
-                    "-lang",
-                    "cpp",
-                    "-cn",
-                    "mydsp",
-                    "-vec",
-                    "-I",
-                    "faust-ddsp",
-                    "-i",
-                    "dsp/main.dsp",
-                    "-o",
-                    "dsp/FaustModule.hpp",
-                ])
-                .status()
-                .expect("Falha ao executar o compilador Faust.");
+    if !force_rust {
+        if let Some(ref bin) = mojo_bin {
+            let src = PathBuf::from("neural/main.mojo");
+            let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+            let lib_name = build_support::neural_lib_filename(&target_os);
+            let out = PathBuf::from(format!("neural/{}", lib_name));
 
-            if !status.success() {
-                panic!("Erro na transpilação do arquivo Faust (main.dsp).");
+            let needs_rebuild = !out.exists()
+                || std::fs::metadata(&src)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .zip(std::fs::metadata(&out).and_then(|m| m.modified()).ok())
+                    .map(|(s, o)| s > o)
+                    .unwrap_or(true);
+
+            if needs_rebuild {
+                println!("cargo:warning=Recompilando Mojo (.mojo -> {})...", lib_name);
+                if let Err(stderr) = compile_mojo(bin, &src, &out) {
+                    panic!("Erro na compilação do Mojo (main.mojo):\n{}", stderr);
+                }
             }
         }
     }
 
-    if mlc_dsp.exists() {
-        let hpp_file = dsp_dir.join("MlcZeroVModule.hpp");
-        let should_rebuild = !hpp_file.exists()
-            || std::fs::metadata(&mlc_dsp).unwrap().modified().unwrap()
-                > std::fs::metadata(&hpp_file).unwrap().modified().unwrap();
-
-        if should_rebuild {
-            println!("cargo:warning=Recompilando Faust MLC ZERO V (.dsp -> .hpp)...");
-            let status = Command::new("faust")
-                .args(&[
-                    "-lang",
-                    "cpp",
-                    "-cn",
-                    "mlczerov",
-                    "-vec",
-                    "-I",
-                    "faust-ddsp",
-                    "-i",
-                    "dsp/mlc_zero_v.dsp",
-                    "-o",
-                    "dsp/MlcZeroVModule.hpp",
-                ])
-                .status()
-                .expect("Falha ao executar o compilador Faust.");
-
-            if !status.success() {
-                panic!("Erro na transpilação do arquivo Faust (mlc_zero_v.dsp).");
-            }
-        }
-    }
-
-    // Rebuild automático do Mojo se .mojo existir e for alterado
-    let main_mojo = PathBuf::from("neural/main.mojo");
-    let lib_so = PathBuf::from("neural/libneural.so");
-    if main_mojo.exists() {
-        let should_rebuild = !lib_so.exists()
-            || std::fs::metadata(&main_mojo).unwrap().modified().unwrap()
-                > std::fs::metadata(&lib_so).unwrap().modified().unwrap();
-
-        if should_rebuild {
-            println!("cargo:warning=Recompilando Mojo (.mojo -> .so)...");
-            let mojo_bin = find_mojo_path().unwrap();
-            let status = Command::new(mojo_bin)
-                .args(&[
-                    "build",
-                    "--emit",
-                    "shared-lib",
-                    "neural/main.mojo",
-                    "-o",
-                    "neural/libneural.so",
-                ])
-                .status()
-                .expect("Falha ao executar o compilador Mojo.");
-
-            if !status.success() {
-                panic!("Erro na compilação do arquivo Mojo (main.mojo).");
-            }
-        }
-    }
-
-    // 1. Compila o Wrapper C++
+    // ── C++ wrapper compilation ───────────────────────────────────────────────
     cc::Build::new()
         .cpp(true)
         .file(dsp_dir.join("wrapper.cpp"))
@@ -172,35 +71,94 @@ fn main() {
         .warnings(false)
         .compile("mlc_zero_v_dsp");
 
-    // 2. Roda o Bindgen
+    // ── Bindgen ───────────────────────────────────────────────────────────────
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+
     let bindings = bindgen::Builder::default()
-        .header(wrapper_h.to_str().unwrap())
+        .header(dsp_dir.join("wrapper.h").to_str().unwrap())
         .allowlist_function("faust_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Não foi possível gerar os bindings do Faust.");
-
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     bindings
         .write_to_file(out_path.join("bindings_faust.rs"))
         .expect("Não foi possível escrever os bindings.");
 
     let mlc_bindings = bindgen::Builder::default()
-        .header(mlc_wrapper_h.to_str().unwrap())
+        .header(dsp_dir.join("mlc_zero_v_wrapper.h").to_str().unwrap())
         .allowlist_function("mlc_zero_v_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Não foi possível gerar os bindings do MLC ZERO V.");
-
     mlc_bindings
         .write_to_file(out_path.join("bindings_mlc_zero_v.rs"))
         .expect("Não foi possível escrever os bindings do MLC ZERO V.");
 
-    // 3. Linking do Mojo
+    // ── Neural library linking ────────────────────────────────────────────────
     let neural_dir = format!("{}/neural", env::var("CARGO_MANIFEST_DIR").unwrap());
-    println!("cargo:rustc-link-search=native={}", neural_dir);
-    if env::var("CARGO_CFG_TARGET_OS").ok().as_deref() == Some("linux") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", neural_dir);
+
+    let have_mojo = !force_rust && mojo_bin.is_some();
+    if have_mojo {
+        println!("cargo:rustc-link-search=native={}", neural_dir);
+        println!("cargo:rustc-link-lib=neural");
+
+        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+        if target_os == "linux" || target_os == "macos" {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", neural_dir);
+        }
     }
-    println!("cargo:rustc-link-lib=dylib=neural");
+}
+
+/// Transpile a Faust `.dsp` to `.hpp`, respecting the freshness check.
+///
+/// - If Faust is absent and the hpp is `Fresh`: emit a warning and continue.
+/// - If Faust is absent and the hpp is `Stale`: panic (stale header would compile wrong DSP).
+/// - If Faust is absent and the hpp is `Missing`: panic with install instructions.
+/// - If Faust is present and the hpp is not `Fresh`: compile.
+fn compile_dsp(
+    dsp: &std::path::Path,
+    hpp: &std::path::Path,
+    class_name: &str,
+    include_dir: &std::path::Path,
+) {
+    if !dsp.exists() {
+        return;
+    }
+
+    let state = header_state(dsp, hpp);
+
+    if build_support::find_faust().is_none() {
+        match state {
+            HeaderState::Fresh => {
+                println!(
+                    "cargo:warning=Faust não encontrado; usando {} versionado (atualizado).",
+                    hpp.display()
+                );
+                return;
+            }
+            HeaderState::Stale => {
+                panic!(
+                    "\n\nERRO: {} está desatualizado face a {} e o Faust não está instalado.\n\
+                     Instale o Faust (https://faust.grame.fr/) e rode novamente.\n\n",
+                    hpp.display(),
+                    dsp.display()
+                );
+            }
+            HeaderState::Missing => {
+                panic!(
+                    "\n\nERRO: {} não encontrado e Faust não está instalado.\n\
+                     Instale o Faust (https://faust.grame.fr/) e rode novamente.\n\n",
+                    hpp.display()
+                );
+            }
+        }
+    }
+
+    // Faust is available — only recompile when needed.
+    if state != HeaderState::Fresh {
+        println!("cargo:warning=Recompilando Faust ({} -> {})...", dsp.display(), hpp.display());
+        if let Err(e) = compile_faust(dsp, hpp, class_name, include_dir) {
+            panic!("Erro na transpilação do Faust ({}):\n{}", dsp.display(), e);
+        }
+    }
 }

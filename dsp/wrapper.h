@@ -1,8 +1,16 @@
 #ifndef FAUST_WRAPPER_H
 #define FAUST_WRAPPER_H
 
-// Usando unsigned long explicitamente invés de stddef para evitar Clang issues de sysroot local
-typedef unsigned long f_size_t;
+// MSVC's cl.exe does not define __SIZE_TYPE__ (a GCC/Clang builtin), so it
+// must fall back to <stddef.h>. GCC/Clang keep __SIZE_TYPE__ since it avoids
+// a header include entirely (bindgen/libclang have been unreliable finding
+// stddef.h without a complete sysroot — see CROSS-05).
+#ifdef _MSC_VER
+#include <stddef.h>
+typedef size_t f_size_t;
+#else
+typedef __SIZE_TYPE__ f_size_t;
+#endif
 
 #ifdef __cplusplus
 extern "C" {

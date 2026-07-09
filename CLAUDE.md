@@ -68,13 +68,20 @@ polly must:
 
 ## Build & Dev Commands
 
+`cargo xtask` is the canonical entry point. `make <target>` delegates to it on Unix.
+
 ```bash
-make run         # Standalone dev mode (cargo run --release --bin standalone)
-make build       # Release build (cargo build --release)
-make bundle      # VST3/CLAP distribution (cargo xtask bundle distortion --release)
-make pre-build   # Compile Faust .dsp + Mojo .mojo sources manually
-make clean       # Remove target/, generated dsp/*.hpp, neural/*.so
-make check-env   # Validate Faust, Mojo, and directory permissions
+cargo xtask check-env   # Validate Faust, Mojo, and directory permissions
+cargo xtask pre-build   # Compile Faust .dsp + Mojo .mojo sources manually
+cargo xtask build       # pre-build + cargo build --release
+cargo xtask run         # pre-build + launch standalone (sets LD_LIBRARY_PATH)
+cargo xtask bundle distortion --release  # VST3/CLAP distribution
+cargo xtask clean       # Remove dsp/*.hpp, neural/libneural.*, target/
+```
+
+Unix shortcuts (delegate to xtask):
+```bash
+make run / make build / make bundle / make clean / make check-env
 ```
 
 - Standalone binary: `cargo run --release --bin standalone`
