@@ -48,8 +48,13 @@ tar = { version = "0.4", optional = true }
 [features]
 default = ["lab", "nih-plug-assert"]
 lab = ["dep:sha2", "dep:semver", "dep:chrono", "dep:uuid", "dep:flate2", "dep:tar"]
+# Forwards to nih_plug's own feature so it stays active by default (per T16),
+# while giving this crate's own code (tests/rt_safety.rs) a same-crate
+# `cfg(feature = "nih-plug-assert")` to check — `cfg(feature = "assert_process_allocs")`
+# would silently always be false here since that name is nih_plug's feature,
+# not this crate's, and Cargo features aren't visible across the dependency
+# boundary without an explicit forwarding feature like this one.
 nih-plug-assert = ["nih_plug/assert_process_allocs"]
-rt-safety-test = []
 
 [profile.release]
 lto = "thin"
