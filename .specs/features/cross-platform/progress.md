@@ -60,35 +60,24 @@ com fallback paths (branch `fix-find-faust-fallbacks`, ver Phase 3).
 
 ---
 
-## 🔄 Phase 3 — Windows/ASIO (T17–T20, T30)
+## ✅ Phase 3 — Windows/ASIO (T17–T20, T30)
 
-**Status:** Em progresso — 3 branches aprovados, 1 em correção
+**Status:** Concluído e mergeado em `main`
+**Commits:** 5 merge commits + 1 squash
 
-### Branches prontos (revisados e aprovados pelo codex)
+| Task | Descrição | Branch | Revisão |
+|------|-----------|--------|---------|
+| — | Corrige `find_faust()` com fallback paths | `fix-find-faust-fallbacks` | ✅ |
+| T17 | Feature `asio` opt-in, target-gated | `phase-3-T17-asio-feature` | ✅ |
+| T18 | ASIO duplex — Device único para input+output | `phase-3-T18-asio-duplex` | ✅ |
+| T20 | Negociação de stream config com fallback | `phase-3-T20-config-range` | ✅ (2 rodadas) |
+| T30 | Identidade estável por enum_index | `phase-3-T30-device-identity` | ✅ |
+| T19 | Dispositivos não-suportados visíveis (desabilitados) | `phase-3-T19-unsupported-formats` | ✅ |
 
-| Branch | Task | Commit | Revisão |
-|--------|------|--------|---------|
-| `fix-find-faust-fallbacks` | Corrige `find_faust()` com fallback paths | `24d090e` | ✅ Aprovado (2 não-bloqueantes) |
-| `phase-3-T17-asio-feature` | Feature `asio` opt-in, target-gated | `56f8e46` | ✅ Aprovado (0 issues) |
-| `phase-3-T30-device-identity` | Identidade estável por enum_index | `96cb4eb` | ✅ Aprovado (0 issues, 7/7 testes) |
-
-### Em correção
-
-| Branch | Task | Commit | Revisão |
-|--------|------|--------|---------|
-| `phase-3-T20-config-range` | Negociação de stream config | `bbce77e` | 🔴 3 bloqueantes em fix |
-
-**Issues do T20 (em correção via `claude_code`):**
-1. Sem fallback quando CPAL rejeita config escolhida
-2. `pick_config` depende de `default_*_config()` antes de enumerar
-3. Input/output negociados independentemente (mismatch de sample rate full-duplex)
-
-### Pendentes
-
-| Task | Descrição | Dependências |
-|------|-----------|--------------|
-| T18 | ASIO buffer-sizing | T17 ✅ |
-| T19 | Sample rate mismatch warning/fix | T17 ✅, T20 🔄 |
+**Novos arquivos:**
+- `src/core/audio_config.rs` — negociação de config (708 linhas, 17 testes)
+- `src/core/device_identity.rs` — identidade estável (163 linhas, 7 testes)
+- `src/core/device_context.rs` — contexto de dispositivo com usable/formatos (337 linhas, 9 testes)
 
 ---
 
@@ -128,8 +117,8 @@ com fallback paths (branch `fix-find-faust-fallbacks`, ver Phase 3).
 | Phase 0 — Build | T1–T5 | ✅ Mergeado |
 | Phase 1 — Neural | T6–T10 | ✅ Mergeado |
 | Phase 2 — Áudio | T11–T16 | ✅ Mergeado |
-| Phase 3 — Windows/ASIO | T17–T20, T30 | 🔄 3/5 aprovados, 1 em fix |
+| Phase 3 — Windows/ASIO | T17–T20, T30 | ✅ Mergeado |
 | Phase 4 — Robustez | T21–T25, T31–T32 | ⏳ Pendente |
 | Phase 5 — Validação | T26–T29 | ⏳ Pendente |
 
-**Total:** 16/32 tasks concluídas (50%)
+**Total:** 22/32 tasks concluídas (69%)
