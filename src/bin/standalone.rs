@@ -1,5 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
+use distortion::core::audio_config::{pick_config, StreamDirection, FALLBACK_MAX_BLOCK};
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::dsp::{
     process_interleaved_block, sample_convert, AnalyzerDsp, AudioSnapshot, StandalonePipeline,
@@ -522,13 +523,10 @@ fn audio_worker(
                 // The actual cpal callback block can exceed the UI slider's
                 // `buffer_size`: `strict_config.buffer_size` is left at
                 // `cpal::BufferSize::Default` below, so the OS/driver picks
-                // the real block size. Probe the input device's supported
-                // range up front so every buffer downstream (pipeline
-                // scratch space, playthrough ring buffer) is sized from what
-                // the device can actually deliver, not just the slider.
-                // Falls back to 8192 when the platform can't report a range
-                // (`SupportedBufferSize::Unknown`, e.g. some ALSA/PulseAudio
-                // paths).
+                // the real block size. Negotiate the input config up front so
+                // every buffer downstream (pipeline scratch space, playthrough
+                // ring buffer) is sized from the block the device actually
+                // promises, not just the slider.
                 let max_block: usize = input
                     .as_ref()
                     .and_then(|(raw_name, _, _)| {
@@ -537,13 +535,11 @@ fn audio_worker(
                             .input_devices()
                             .ok()?
                             .find(|d| d.name().unwrap_or_default() == *raw_name)?;
-                        let config = device.default_input_config().ok()?;
-                        match config.buffer_size() {
-                            cpal::SupportedBufferSize::Range { max, .. } => Some(*max as usize),
-                            cpal::SupportedBufferSize::Unknown => None,
-                        }
+                        pick_config(&device, StreamDirection::Input)
+                            .ok()
+                            .map(|picked| picked.max_block)
                     })
-                    .unwrap_or(8192)
+                    .unwrap_or(FALLBACK_MAX_BLOCK)
                     .max(buffer_size as usize);
 
                 let has_both = input.is_some() && output.is_some();
@@ -563,7 +559,9 @@ fn audio_worker(
                                 .into_iter()
                                 .find(|d| d.name().unwrap_or_default() == raw_name)
                             {
-                                if let Ok(config) = device.default_input_config() {
+                                if let Ok(config) =
+                                    pick_config(&device, StreamDirection::Input).map(|p| p.config)
+                                {
                                     let mut strict_config: cpal::StreamConfig =
                                         config.clone().into();
                                     strict_config.buffer_size = cpal::BufferSize::Default;
@@ -762,7 +760,9 @@ fn audio_worker(
                                 .into_iter()
                                 .find(|d| d.name().unwrap_or_default() == raw_name)
                             {
-                                if let Ok(config) = device.default_output_config() {
+                                if let Ok(config) =
+                                    pick_config(&device, StreamDirection::Output).map(|p| p.config)
+                                {
                                     let mut strict_config: cpal::StreamConfig =
                                         config.clone().into();
                                     strict_config.buffer_size = cpal::BufferSize::Default;
