@@ -434,6 +434,48 @@ fn beautify_linux_name(raw: &str, is_input: bool) -> (String, bool) {
     (format!("{} (Cru)", raw), false)
 }
 
+/// Resolve the single `Device` that ASIO's input and output streams must share (CROSS-15).
+///
+/// An ASIO driver owns exactly one input/output stream pair behind a shared
+/// `Arc<Mutex<AsioStreams>>`. Enumerating the driver twice — once via
+/// `input_devices()`, once via `output_devices()` — yields two `Device`s whose Arcs
+/// are independent, so building the second stream tears the first one down. Cloning
+/// one `Device` keeps both streams on the same Arc.
+///
+/// Returns `None` on every other host, and when only one direction is routed, so the
+/// per-direction lookup stays exactly as it was.
+fn asio_duplex_device(
+    host: &cpal::Host,
+    host_id: cpal::HostId,
+    input: &Option<(String, usize, usize)>,
+    output: &Option<(String, usize, usize)>,
+) -> Option<cpal::Device> {
+    // `HostId::Asio` is only generated for `all(windows, feature = "asio")`, so the
+    // body cannot even name it elsewhere.
+    #[cfg(all(target_os = "windows", feature = "asio"))]
+    {
+        if host_id != cpal::HostId::Asio {
+            return None;
+        }
+        let (in_name, _, _) = input.as_ref()?;
+        let (out_name, _, _) = output.as_ref()?;
+        if in_name != out_name {
+            eprintln!(
+                "[Audio Engine] ASIO expõe um único device duplex; entrada {in_name:?} e \
+                 saída {out_name:?} diferem — usando {out_name:?} para ambas."
+            );
+        }
+        host.output_devices()
+            .ok()?
+            .find(|d| d.name().unwrap_or_default() == *out_name)
+    }
+    #[cfg(not(all(target_os = "windows", feature = "asio")))]
+    {
+        let _ = (host, host_id, input, output);
+        None
+    }
+}
+
 fn audio_worker(
     rx_cmd: Receiver<AudioCommand>,
     tx_event: Sender<AudioEvent>,
@@ -557,288 +599,286 @@ fn audio_worker(
                 let state_clone = standalone_state.clone();
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
+                    let duplex_device = asio_duplex_device(&host, host_id, &input, &output);
+
                     if let Some((raw_name, left, right)) = input {
-                        if let Ok(devs) = host.input_devices() {
-                            if let Some(device) = devs
-                                .into_iter()
+                        let device = duplex_device.clone().or_else(|| {
+                            host.input_devices()
+                                .ok()?
                                 .find(|d| d.name().unwrap_or_default() == raw_name)
-                            {
-                                if let Ok(config) = device.default_input_config() {
-                                    let mut strict_config: cpal::StreamConfig =
-                                        config.clone().into();
-                                    strict_config.buffer_size = cpal::BufferSize::Default;
-                                    let channels = strict_config.channels;
-                                    let l_idx = left.min((channels.saturating_sub(1)) as usize);
-                                    let r_idx = right.min((channels.saturating_sub(1)) as usize);
+                        });
+                        if let Some(device) = device {
+                            if let Ok(config) = device.default_input_config() {
+                                let mut strict_config: cpal::StreamConfig = config.clone().into();
+                                strict_config.buffer_size = cpal::BufferSize::Default;
+                                let channels = strict_config.channels;
+                                let l_idx = left.min((channels.saturating_sub(1)) as usize);
+                                let r_idx = right.min((channels.saturating_sub(1)) as usize);
 
-                                    // INICIALIZAÇÃO DSP: Fora do loop de processamento! Comum aos
-                                    // três formatos nativos suportados (F32/I32/I16, T15) — cada
-                                    // um só difere na conversão de amostra usada ao desinterlear
-                                    // (sample_convert) e no tipo que o cpal exige no callback; a
-                                    // pipeline e os buffers de scratch são construídos uma única
-                                    // vez e movidos para dentro de qual braço for de fato
-                                    // utilizado.
-                                    let s_rate = strict_config.sample_rate.0 as f32;
+                                // INICIALIZAÇÃO DSP: Fora do loop de processamento! Comum aos
+                                // três formatos nativos suportados (F32/I32/I16, T15) — cada
+                                // um só difere na conversão de amostra usada ao desinterlear
+                                // (sample_convert) e no tipo que o cpal exige no callback; a
+                                // pipeline e os buffers de scratch são construídos uma única
+                                // vez e movidos para dentro de qual braço for de fato
+                                // utilizado.
+                                let s_rate = strict_config.sample_rate.0 as f32;
 
-                                    // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
-                                    cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
-                                    cabinet_max_block.store(max_block, Ordering::Relaxed);
-                                    {
-                                        // Resolver o IR ativo e publicar um runtime para este sample rate.
-                                        let mut hash = state_clone
+                                // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
+                                cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
+                                cabinet_max_block.store(max_block, Ordering::Relaxed);
+                                {
+                                    // Resolver o IR ativo e publicar um runtime para este sample rate.
+                                    let mut hash = state_clone
+                                        .lock()
+                                        .ok()
+                                        .map(|s| s.cab_active_hash.clone())
+                                        .unwrap_or_default();
+                                    if hash.is_empty() {
+                                        hash = cabinet_library
                                             .lock()
                                             .ok()
-                                            .map(|s| s.cab_active_hash.clone())
+                                            .and_then(|l| l.get_selected_hash().ok().flatten())
                                             .unwrap_or_default();
-                                        if hash.is_empty() {
-                                            hash = cabinet_library
-                                                .lock()
-                                                .ok()
-                                                .and_then(|l| l.get_selected_hash().ok().flatten())
-                                                .unwrap_or_default();
-                                        }
-                                        if !hash.is_empty() {
-                                            if let Ok(l) = cabinet_library.lock() {
-                                                if let Ok((_, bytes)) = l.get_ir_by_hash(&hash) {
-                                                    if let Ok(rt) = CabinetRuntime::build(
-                                                        &bytes, s_rate, max_block,
-                                                    ) {
-                                                        cabinet_mailbox.publish(rt);
-                                                    }
+                                    }
+                                    if !hash.is_empty() {
+                                        if let Ok(l) = cabinet_library.lock() {
+                                            if let Ok((_, bytes)) = l.get_ir_by_hash(&hash) {
+                                                if let Ok(rt) =
+                                                    CabinetRuntime::build(&bytes, s_rate, max_block)
+                                                {
+                                                    cabinet_mailbox.publish(rt);
                                                 }
                                             }
                                         }
                                     }
+                                }
 
-                                    // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
-                                    let pre_eq_ir =
-                                        decode_wav_flat(DEFAULT_PRE_EQ_IR).unwrap_or_default();
+                                // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
+                                let pre_eq_ir =
+                                    decode_wav_flat(DEFAULT_PRE_EQ_IR).unwrap_or_default();
 
-                                    let mut pipeline = StandalonePipeline::new(
-                                        s_rate,
-                                        max_block,
-                                        &pre_eq_ir,
-                                        cabinet_mailbox.clone(),
-                                    );
+                                let mut pipeline = StandalonePipeline::new(
+                                    s_rate,
+                                    max_block,
+                                    &pre_eq_ir,
+                                    cabinet_mailbox.clone(),
+                                );
 
-                                    // Buffers temporários para processamento in-place em bloco
-                                    let mut buf_l = vec![0.0; max_block];
-                                    let mut buf_r = vec![0.0; max_block];
-                                    let channels_usize = channels as usize;
+                                // Buffers temporários para processamento in-place em bloco
+                                let mut buf_l = vec![0.0; max_block];
+                                let mut buf_r = vec![0.0; max_block];
+                                let channels_usize = channels as usize;
 
-                                    let stream_res = match config.sample_format() {
-                                        cpal::SampleFormat::F32 => device.build_input_stream(
-                                            &strict_config,
-                                            move |data: &[f32], _: &_| {
-                                                let snap = state_clone
-                                                    .try_lock()
-                                                    .map(|g| g.audio())
-                                                    .unwrap_or_else(|_| AudioSnapshot::default());
-                                                process_interleaved_block(
-                                                    &mut pipeline,
-                                                    data,
-                                                    channels_usize,
-                                                    l_idx,
-                                                    r_idx,
-                                                    |s| s,
-                                                    &mut buf_l,
-                                                    &mut buf_r,
-                                                    &snap,
-                                                    |out_l, out_r| {
-                                                        for i in 0..out_l.len() {
-                                                            let mix = (out_l[i] + out_r[i]) * 0.5;
-                                                            let _ = analyzer_producer.push(mix);
-                                                            if let Some(pp) = pt_producer.as_mut() {
-                                                                let _ = pp.push(out_l[i]);
-                                                                let _ = pp.push(out_r[i]);
-                                                            }
+                                let stream_res = match config.sample_format() {
+                                    cpal::SampleFormat::F32 => device.build_input_stream(
+                                        &strict_config,
+                                        move |data: &[f32], _: &_| {
+                                            let snap = state_clone
+                                                .try_lock()
+                                                .map(|g| g.audio())
+                                                .unwrap_or_else(|_| AudioSnapshot::default());
+                                            process_interleaved_block(
+                                                &mut pipeline,
+                                                data,
+                                                channels_usize,
+                                                l_idx,
+                                                r_idx,
+                                                |s| s,
+                                                &mut buf_l,
+                                                &mut buf_r,
+                                                &snap,
+                                                |out_l, out_r| {
+                                                    for i in 0..out_l.len() {
+                                                        let mix = (out_l[i] + out_r[i]) * 0.5;
+                                                        let _ = analyzer_producer.push(mix);
+                                                        if let Some(pp) = pt_producer.as_mut() {
+                                                            let _ = pp.push(out_l[i]);
+                                                            let _ = pp.push(out_r[i]);
                                                         }
-                                                    },
-                                                );
-                                            },
-                                            |err| eprintln!("Input error: {:?}", err),
-                                            None,
-                                        ),
-                                        cpal::SampleFormat::I32 => device.build_input_stream(
-                                            &strict_config,
-                                            move |data: &[i32], _: &_| {
-                                                let snap = state_clone
-                                                    .try_lock()
-                                                    .map(|g| g.audio())
-                                                    .unwrap_or_else(|_| AudioSnapshot::default());
-                                                process_interleaved_block(
-                                                    &mut pipeline,
-                                                    data,
-                                                    channels_usize,
-                                                    l_idx,
-                                                    r_idx,
-                                                    sample_convert::i32_to_f32,
-                                                    &mut buf_l,
-                                                    &mut buf_r,
-                                                    &snap,
-                                                    |out_l, out_r| {
-                                                        for i in 0..out_l.len() {
-                                                            let mix = (out_l[i] + out_r[i]) * 0.5;
-                                                            let _ = analyzer_producer.push(mix);
-                                                            if let Some(pp) = pt_producer.as_mut() {
-                                                                let _ = pp.push(out_l[i]);
-                                                                let _ = pp.push(out_r[i]);
-                                                            }
+                                                    }
+                                                },
+                                            );
+                                        },
+                                        |err| eprintln!("Input error: {:?}", err),
+                                        None,
+                                    ),
+                                    cpal::SampleFormat::I32 => device.build_input_stream(
+                                        &strict_config,
+                                        move |data: &[i32], _: &_| {
+                                            let snap = state_clone
+                                                .try_lock()
+                                                .map(|g| g.audio())
+                                                .unwrap_or_else(|_| AudioSnapshot::default());
+                                            process_interleaved_block(
+                                                &mut pipeline,
+                                                data,
+                                                channels_usize,
+                                                l_idx,
+                                                r_idx,
+                                                sample_convert::i32_to_f32,
+                                                &mut buf_l,
+                                                &mut buf_r,
+                                                &snap,
+                                                |out_l, out_r| {
+                                                    for i in 0..out_l.len() {
+                                                        let mix = (out_l[i] + out_r[i]) * 0.5;
+                                                        let _ = analyzer_producer.push(mix);
+                                                        if let Some(pp) = pt_producer.as_mut() {
+                                                            let _ = pp.push(out_l[i]);
+                                                            let _ = pp.push(out_r[i]);
                                                         }
-                                                    },
-                                                );
-                                            },
-                                            |err| eprintln!("Input error: {:?}", err),
-                                            None,
-                                        ),
-                                        cpal::SampleFormat::I16 => device.build_input_stream(
-                                            &strict_config,
-                                            move |data: &[i16], _: &_| {
-                                                let snap = state_clone
-                                                    .try_lock()
-                                                    .map(|g| g.audio())
-                                                    .unwrap_or_else(|_| AudioSnapshot::default());
-                                                process_interleaved_block(
-                                                    &mut pipeline,
-                                                    data,
-                                                    channels_usize,
-                                                    l_idx,
-                                                    r_idx,
-                                                    sample_convert::i16_to_f32,
-                                                    &mut buf_l,
-                                                    &mut buf_r,
-                                                    &snap,
-                                                    |out_l, out_r| {
-                                                        for i in 0..out_l.len() {
-                                                            let mix = (out_l[i] + out_r[i]) * 0.5;
-                                                            let _ = analyzer_producer.push(mix);
-                                                            if let Some(pp) = pt_producer.as_mut() {
-                                                                let _ = pp.push(out_l[i]);
-                                                                let _ = pp.push(out_r[i]);
-                                                            }
+                                                    }
+                                                },
+                                            );
+                                        },
+                                        |err| eprintln!("Input error: {:?}", err),
+                                        None,
+                                    ),
+                                    cpal::SampleFormat::I16 => device.build_input_stream(
+                                        &strict_config,
+                                        move |data: &[i16], _: &_| {
+                                            let snap = state_clone
+                                                .try_lock()
+                                                .map(|g| g.audio())
+                                                .unwrap_or_else(|_| AudioSnapshot::default());
+                                            process_interleaved_block(
+                                                &mut pipeline,
+                                                data,
+                                                channels_usize,
+                                                l_idx,
+                                                r_idx,
+                                                sample_convert::i16_to_f32,
+                                                &mut buf_l,
+                                                &mut buf_r,
+                                                &snap,
+                                                |out_l, out_r| {
+                                                    for i in 0..out_l.len() {
+                                                        let mix = (out_l[i] + out_r[i]) * 0.5;
+                                                        let _ = analyzer_producer.push(mix);
+                                                        if let Some(pp) = pt_producer.as_mut() {
+                                                            let _ = pp.push(out_l[i]);
+                                                            let _ = pp.push(out_r[i]);
                                                         }
-                                                    },
-                                                );
-                                            },
-                                            |err| eprintln!("Input error: {:?}", err),
-                                            None,
-                                        ),
-                                        // Any other native format cpal could report is rejected
-                                        // explicitly rather than silently passed through DSP-free.
-                                        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
-                                    };
+                                                    }
+                                                },
+                                            );
+                                        },
+                                        |err| eprintln!("Input error: {:?}", err),
+                                        None,
+                                    ),
+                                    // Any other native format cpal could report is rejected
+                                    // explicitly rather than silently passed through DSP-free.
+                                    _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+                                };
 
-                                    match stream_res {
-                                        Ok(str) => {
-                                            if let Err(e) = str.play() {
-                                                err_msg = Some(format!(
-                                                    "❌ Falha no Play da Entrada: {:?}",
-                                                    e
-                                                ));
-                                            } else {
-                                                _input_stream = Some(str);
-                                            }
-                                        }
-                                        Err(e) => {
-                                            err_msg = Some(match config.sample_format() {
-                                                cpal::SampleFormat::F32 => format!("Erro buffer: {:?}", e),
-                                                other => format!(
-                                                    "Formato de entrada {:?} não suportado — a cadeia de DSP (Faust/Neural/Cabinet) requer amostras F32. Selecione outro dispositivo ou driver de áudio.",
-                                                    other
-                                                ),
-                                            });
+                                match stream_res {
+                                    Ok(str) => {
+                                        if let Err(e) = str.play() {
+                                            err_msg = Some(format!(
+                                                "❌ Falha no Play da Entrada: {:?}",
+                                                e
+                                            ));
+                                        } else {
+                                            _input_stream = Some(str);
                                         }
                                     }
+                                    Err(e) => {
+                                        err_msg = Some(match config.sample_format() {
+                                            cpal::SampleFormat::F32 => format!("Erro buffer: {:?}", e),
+                                            other => format!(
+                                                "Formato de entrada {:?} não suportado — a cadeia de DSP (Faust/Neural/Cabinet) requer amostras F32. Selecione outro dispositivo ou driver de áudio.",
+                                                other
+                                            ),
+                                        });
+                                    }
                                 }
-                            } else {
-                                err_msg = Some("Input Físico não encontrado.".to_string());
                             }
+                        } else {
+                            err_msg = Some("Input Físico não encontrado.".to_string());
                         }
                     }
 
                     if let Some((raw_name, left, right)) = output {
-                        if let Ok(devs) = host.output_devices() {
-                            if let Some(device) = devs
-                                .into_iter()
+                        let device = duplex_device.or_else(|| {
+                            host.output_devices()
+                                .ok()?
                                 .find(|d| d.name().unwrap_or_default() == raw_name)
-                            {
-                                if let Ok(config) = device.default_output_config() {
-                                    let mut strict_config: cpal::StreamConfig =
-                                        config.clone().into();
-                                    strict_config.buffer_size = cpal::BufferSize::Default;
-                                    let channels = strict_config.channels;
-                                    let l_idx = left.min((channels.saturating_sub(1)) as usize);
-                                    let r_idx = right.min((channels.saturating_sub(1)) as usize);
+                        });
+                        if let Some(device) = device {
+                            if let Ok(config) = device.default_output_config() {
+                                let mut strict_config: cpal::StreamConfig = config.clone().into();
+                                strict_config.buffer_size = cpal::BufferSize::Default;
+                                let channels = strict_config.channels;
+                                let l_idx = left.min((channels.saturating_sub(1)) as usize);
+                                let r_idx = right.min((channels.saturating_sub(1)) as usize);
 
-                                    let stream_res = match config.sample_format() {
-                                        cpal::SampleFormat::F32 => device.build_output_stream(
-                                            &strict_config,
-                                            move |data: &mut [f32], _: &_| {
-                                                for frame in data.chunks_mut(channels as usize) {
-                                                    let (l_sample, r_sample) =
-                                                        match pt_consumer.as_mut() {
-                                                            Some(pc) => (
-                                                                pc.pop().unwrap_or(0.0),
-                                                                pc.pop().unwrap_or(0.0),
-                                                            ),
-                                                            None => (0.0, 0.0),
-                                                        };
-                                                    if let Some(l) = frame.get_mut(l_idx) {
-                                                        *l = l_sample;
-                                                    }
-                                                    if let Some(r) = frame.get_mut(r_idx) {
-                                                        *r = r_sample;
-                                                    }
+                                let stream_res = match config.sample_format() {
+                                    cpal::SampleFormat::F32 => device.build_output_stream(
+                                        &strict_config,
+                                        move |data: &mut [f32], _: &_| {
+                                            for frame in data.chunks_mut(channels as usize) {
+                                                let (l_sample, r_sample) =
+                                                    match pt_consumer.as_mut() {
+                                                        Some(pc) => (
+                                                            pc.pop().unwrap_or(0.0),
+                                                            pc.pop().unwrap_or(0.0),
+                                                        ),
+                                                        None => (0.0, 0.0),
+                                                    };
+                                                if let Some(l) = frame.get_mut(l_idx) {
+                                                    *l = l_sample;
                                                 }
-                                            },
-                                            |err| eprintln!("Output error: {:?}", err),
-                                            None,
-                                        ),
-                                        cpal::SampleFormat::I16 => device.build_output_stream(
-                                            &strict_config,
-                                            move |data: &mut [i16], _: &_| {
-                                                for frame in data.chunks_mut(channels as usize) {
-                                                    let (l_sample, r_sample) =
-                                                        match pt_consumer.as_mut() {
-                                                            Some(pc) => (
-                                                                pc.pop().unwrap_or(0.0),
-                                                                pc.pop().unwrap_or(0.0),
-                                                            ),
-                                                            None => (0.0, 0.0),
-                                                        };
-                                                    if let Some(l) = frame.get_mut(l_idx) {
-                                                        *l = (l_sample * i16::MAX as f32) as i16;
-                                                    }
-                                                    if let Some(r) = frame.get_mut(r_idx) {
-                                                        *r = (r_sample * i16::MAX as f32) as i16;
-                                                    }
+                                                if let Some(r) = frame.get_mut(r_idx) {
+                                                    *r = r_sample;
                                                 }
-                                            },
-                                            |err| eprintln!("Output error: {:?}", err),
-                                            None,
-                                        ),
-                                        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
-                                    };
-
-                                    match stream_res {
-                                        Ok(str) => {
-                                            if let Err(e) = str.play() {
-                                                err_msg = Some(format!(
-                                                    "❌ Falha no Play da Saída: {:?}",
-                                                    e
-                                                ));
-                                            } else {
-                                                _output_stream = Some(str);
                                             }
-                                        }
-                                        Err(e) => {
-                                            err_msg = Some(format!("Erro out: {:?}", e));
+                                        },
+                                        |err| eprintln!("Output error: {:?}", err),
+                                        None,
+                                    ),
+                                    cpal::SampleFormat::I16 => device.build_output_stream(
+                                        &strict_config,
+                                        move |data: &mut [i16], _: &_| {
+                                            for frame in data.chunks_mut(channels as usize) {
+                                                let (l_sample, r_sample) =
+                                                    match pt_consumer.as_mut() {
+                                                        Some(pc) => (
+                                                            pc.pop().unwrap_or(0.0),
+                                                            pc.pop().unwrap_or(0.0),
+                                                        ),
+                                                        None => (0.0, 0.0),
+                                                    };
+                                                if let Some(l) = frame.get_mut(l_idx) {
+                                                    *l = (l_sample * i16::MAX as f32) as i16;
+                                                }
+                                                if let Some(r) = frame.get_mut(r_idx) {
+                                                    *r = (r_sample * i16::MAX as f32) as i16;
+                                                }
+                                            }
+                                        },
+                                        |err| eprintln!("Output error: {:?}", err),
+                                        None,
+                                    ),
+                                    _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
+                                };
+
+                                match stream_res {
+                                    Ok(str) => {
+                                        if let Err(e) = str.play() {
+                                            err_msg =
+                                                Some(format!("❌ Falha no Play da Saída: {:?}", e));
+                                        } else {
+                                            _output_stream = Some(str);
                                         }
                                     }
+                                    Err(e) => {
+                                        err_msg = Some(format!("Erro out: {:?}", e));
+                                    }
                                 }
-                            } else {
-                                err_msg = Some("Output Físico não encontrado.".to_string());
                             }
+                        } else {
+                            err_msg = Some("Output Físico não encontrado.".to_string());
                         }
                     }
                 } else {
