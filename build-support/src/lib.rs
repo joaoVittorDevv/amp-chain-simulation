@@ -59,9 +59,47 @@ pub fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// Locates the `faust` binary: checks PATH first.
+/// Standard install locations for `faust` on the host OS, tried in order when
+/// the binary is absent from `PATH`.
+///
+/// Empty on platforms with no conventional prefix, which reduces `find_faust`
+/// to its PATH lookup.
+fn faust_fallback_paths() -> &'static [&'static str] {
+    #[cfg(target_os = "linux")]
+    {
+        &["/usr/bin/faust", "/usr/local/bin/faust"]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Apple Silicon Homebrew prefix, then the Intel one.
+        &["/opt/homebrew/bin/faust", "/usr/local/bin/faust"]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        &[r"C:\Program Files\Faust\bin\faust.exe"]
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        &[]
+    }
+}
+
+/// Locates the `faust` binary:
+///   1. PATH via `which_like`
+///   2. The host OS's standard install prefixes (see `faust_fallback_paths`)
 pub fn find_faust() -> Option<PathBuf> {
-    which_like("faust").filter(|p| is_executable(p))
+    if let Some(p) = which_like("faust").filter(|p| is_executable(p)) {
+        return Some(p);
+    }
+
+    for candidate in faust_fallback_paths() {
+        let path = Path::new(candidate);
+        if is_executable(path) {
+            return Some(path.to_path_buf());
+        }
+    }
+
+    None
 }
 
 /// Locates the `mojo` binary:
@@ -332,6 +370,19 @@ mod tests {
         let p = std::env::temp_dir().join("bs_test_does_not_exist_xyz");
         let _ = std::fs::remove_file(&p);
         assert!(!is_executable(&p));
+    }
+
+    #[test]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    fn faust_fallback_paths_are_absolute() {
+        let paths = faust_fallback_paths();
+        assert!(!paths.is_empty(), "supported platforms must list a prefix");
+        for p in paths {
+            assert!(
+                Path::new(p).is_absolute(),
+                "fallback {p} must be absolute — it is probed without a PATH lookup"
+            );
+        }
     }
 
     #[test]
