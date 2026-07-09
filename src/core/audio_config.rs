@@ -65,8 +65,8 @@ pub fn max_block_from(buffer_size: &SupportedBufferSize) -> usize {
     }
 }
 
-/// Choose the best config among `ranges`, or `None` when none carries a format
-/// in `allowed`.
+/// Choose the best configs among `ranges`, sorted by preference (best first).
+/// Returns empty when none carries a format in `allowed`.
 ///
 /// Ranked by, in order: distance from `default_sample_rate` (resampling is the
 /// most expensive concession), distance from `default_channels` (a channel
@@ -78,8 +78,8 @@ pub fn pick_from_ranges(
     default_sample_rate: SampleRate,
     default_channels: u16,
     allowed: &[SampleFormat],
-) -> Option<PickedConfig> {
-    ranges
+) -> Vec<PickedConfig> {
+    let mut candidates: Vec<_> = ranges
         .iter()
         .filter_map(|range| {
             let rank = allowed.iter().position(|f| *f == range.sample_format())?;
@@ -93,31 +93,29 @@ pub fn pick_from_ranges(
                 range.channels().abs_diff(default_channels),
                 rank,
             );
-            Some((key, range, SampleRate(rate)))
-        })
-        .min_by_key(|(key, _, _)| *key)
-        .and_then(|(_, range, rate)| {
             let max_block = max_block_from(range.buffer_size());
-            Some(PickedConfig {
-                config: (*range).try_with_sample_rate(rate)?,
-                max_block,
-            })
+            let config = (*range).try_with_sample_rate(SampleRate(rate))?;
+            Some((key, PickedConfig { config, max_block }))
         })
+        .collect();
+
+    // Sort by rank (best first)
+    candidates.sort_by_key(|(key, _)| *key);
+
+    // Extract just the configs
+    candidates.into_iter().map(|(_, cfg)| cfg).collect()
 }
 
-/// Negotiate a stream config for `device`.
+/// Negotiate stream configs for `device`, sorted by preference (best first).
 ///
-/// Falls back to `default_*_config()` when the device cannot enumerate its
-/// supported configs, enumerates none, or enumerates none we can build.
+/// Tries enumeration first. Falls back to `default_*_config()` only when the
+/// device cannot enumerate its supported configs, enumerates none, or
+/// enumerates none we can build.
 pub fn pick_config(
     device: &Device,
     dir: StreamDirection,
-) -> Result<PickedConfig, cpal::DefaultStreamConfigError> {
-    let default = match dir {
-        StreamDirection::Input => device.default_input_config()?,
-        StreamDirection::Output => device.default_output_config()?,
-    };
-
+) -> Result<Vec<PickedConfig>, cpal::DefaultStreamConfigError> {
+    // Try enumeration first (Issue 2 fix)
     let ranges: Vec<SupportedStreamConfigRange> = match dir {
         StreamDirection::Input => device
             .supported_input_configs()
@@ -129,17 +127,98 @@ pub fn pick_config(
             .unwrap_or_default(),
     };
 
-    let picked = pick_from_ranges(
-        &ranges,
-        default.sample_rate(),
-        default.channels(),
-        dir.formats(),
-    );
+    // If enumeration succeeded and we have candidates, use them
+    if !ranges.is_empty() {
+        // We need a default to use as preference hint, but try enumeration first
+        let default_result = match dir {
+            StreamDirection::Input => device.default_input_config(),
+            StreamDirection::Output => device.default_output_config(),
+        };
 
-    Ok(picked.unwrap_or_else(|| PickedConfig {
+        let (default_sr, default_ch) = match default_result {
+            Ok(def) => (def.sample_rate(), def.channels()),
+            // If no default available, use reasonable hints
+            Err(_) => (SampleRate(48_000), 2),
+        };
+
+        let picked = pick_from_ranges(&ranges, default_sr, default_ch, dir.formats());
+
+        if !picked.is_empty() {
+            return Ok(picked);
+        }
+    }
+
+    // Fall back to default config only if enumeration failed or returned nothing
+    let default = match dir {
+        StreamDirection::Input => device.default_input_config()?,
+        StreamDirection::Output => device.default_output_config()?,
+    };
+
+    Ok(vec![PickedConfig {
         max_block: max_block_from(default.buffer_size()),
         config: default,
-    }))
+    }])
+}
+
+/// Negotiate full-duplex configs with a common sample rate (Issue 3 fix).
+///
+/// Picks configs where both devices can run at the same sample rate. If no
+/// common rate exists, returns configs at the input's preferred rate and logs
+/// a warning. Returns `(input_configs, output_configs, common_sample_rate)`.
+pub fn pick_full_duplex(
+    input_device: &Device,
+    output_device: &Device,
+) -> Result<(Vec<PickedConfig>, Vec<PickedConfig>, SampleRate), cpal::DefaultStreamConfigError> {
+    let input_configs = pick_config(input_device, StreamDirection::Input)?;
+    let output_configs = pick_config(output_device, StreamDirection::Output)?;
+
+    if input_configs.is_empty() || output_configs.is_empty() {
+        return Err(cpal::DefaultStreamConfigError::StreamTypeNotSupported);
+    }
+
+    // Build a set of sample rates both devices support
+    let input_rates: std::collections::HashSet<u32> = input_configs
+        .iter()
+        .map(|cfg| cfg.config.sample_rate().0)
+        .collect();
+    let output_rates: std::collections::HashSet<u32> = output_configs
+        .iter()
+        .map(|cfg| cfg.config.sample_rate().0)
+        .collect();
+
+    let common_rates: Vec<u32> = input_rates.intersection(&output_rates).copied().collect();
+
+    let selected_rate = if !common_rates.is_empty() {
+        // Prefer the input's best rate if it's in the common set
+        let input_best_rate = input_configs[0].config.sample_rate().0;
+        if common_rates.contains(&input_best_rate) {
+            SampleRate(input_best_rate)
+        } else {
+            // Otherwise pick the highest common rate
+            SampleRate(*common_rates.iter().max().unwrap())
+        }
+    } else {
+        // No common rate: use input's preferred rate and warn
+        let input_rate = input_configs[0].config.sample_rate();
+        eprintln!(
+            "⚠ Warning: Input and output devices have no common sample rate. \
+             Using input rate {} Hz — output may fail to open.",
+            input_rate.0
+        );
+        input_rate
+    };
+
+    // Filter configs to only those matching the selected rate
+    let in_filtered: Vec<_> = input_configs
+        .into_iter()
+        .filter(|cfg| cfg.config.sample_rate() == selected_rate)
+        .collect();
+    let out_filtered: Vec<_> = output_configs
+        .into_iter()
+        .filter(|cfg| cfg.config.sample_rate() == selected_rate)
+        .collect();
+
+    Ok((in_filtered, out_filtered, selected_rate))
 }
 
 #[cfg(test)]
@@ -172,18 +251,18 @@ mod tests {
             fixed(SampleFormat::I32, 48_000),
             fixed(SampleFormat::F32, 48_000),
         ];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).expect("a config");
-        assert_eq!(picked.config.sample_format(), SampleFormat::F32);
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::F32);
 
         // Drop F32 and I32 must win over I16; drop it too and I16 remains.
-        let picked = pick_from_ranges(&ranges[..2], SampleRate(48_000), 2, &INPUT_FORMATS)
-            .expect("a config");
-        assert_eq!(picked.config.sample_format(), SampleFormat::I32);
+        let picked = pick_from_ranges(&ranges[..2], SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::I32);
 
-        let picked = pick_from_ranges(&ranges[..1], SampleRate(48_000), 2, &INPUT_FORMATS)
-            .expect("a config");
-        assert_eq!(picked.config.sample_format(), SampleFormat::I16);
+        let picked = pick_from_ranges(&ranges[..1], SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::I16);
     }
 
     #[test]
@@ -194,9 +273,9 @@ mod tests {
             fixed(SampleFormat::I32, 48_000),
             fixed(SampleFormat::I16, 48_000),
         ];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &OUTPUT_FORMATS).expect("a config");
-        assert_eq!(picked.config.sample_format(), SampleFormat::I16);
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &OUTPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::I16);
     }
 
     #[test]
@@ -207,24 +286,24 @@ mod tests {
             fixed(SampleFormat::F32, 44_100),
             fixed(SampleFormat::I16, 48_000),
         ];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).expect("a config");
-        assert_eq!(picked.config.sample_rate(), SampleRate(48_000));
-        assert_eq!(picked.config.sample_format(), SampleFormat::I16);
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.sample_rate(), SampleRate(48_000));
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::I16);
     }
 
     #[test]
     fn pick_config_clamps_the_default_rate_into_a_range() {
         let buffer = SupportedBufferSize::Range { min: 64, max: 512 };
         let ranges = [range(SampleFormat::F32, 88_200, 192_000, buffer)];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).expect("a config");
-        assert_eq!(picked.config.sample_rate(), SampleRate(88_200));
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.sample_rate(), SampleRate(88_200));
 
         let ranges = [range(SampleFormat::F32, 44_100, 96_000, buffer)];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).expect("a config");
-        assert_eq!(picked.config.sample_rate(), SampleRate(48_000));
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.sample_rate(), SampleRate(48_000));
     }
 
     #[test]
@@ -248,10 +327,10 @@ mod tests {
                 SampleFormat::I16,
             ),
         ];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).expect("a config");
-        assert_eq!(picked.config.channels(), 2);
-        assert_eq!(picked.config.sample_format(), SampleFormat::I16);
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].config.channels(), 2);
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::I16);
     }
 
     #[test]
@@ -262,9 +341,9 @@ mod tests {
             48_000,
             SupportedBufferSize::Range { min: 64, max: 512 },
         )];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).expect("a config");
-        assert_eq!(picked.max_block, 512);
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].max_block, 512);
     }
 
     #[test]
@@ -275,9 +354,9 @@ mod tests {
             48_000,
             SupportedBufferSize::Unknown,
         )];
-        let picked =
-            pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).expect("a config");
-        assert_eq!(picked.max_block, FALLBACK_MAX_BLOCK);
+        let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert!(!picked.is_empty(), "expected configs");
+        assert_eq!(picked[0].max_block, FALLBACK_MAX_BLOCK);
 
         // A degenerate `max: 0` is as useless as `Unknown`.
         assert_eq!(
@@ -298,19 +377,19 @@ mod tests {
     }
 
     #[test]
-    fn pick_config_returns_none_without_a_supported_format() {
+    fn pick_config_returns_empty_without_a_supported_format() {
         let ranges = [
             fixed(SampleFormat::U8, 48_000),
             fixed(SampleFormat::F64, 48_000),
         ];
-        assert!(pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).is_none());
-        assert!(pick_from_ranges(&[], SampleRate(48_000), 2, &INPUT_FORMATS).is_none());
+        assert!(pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).is_empty());
+        assert!(pick_from_ranges(&[], SampleRate(48_000), 2, &INPUT_FORMATS).is_empty());
     }
 
     #[test]
     fn pick_config_skips_an_inverted_sample_rate_range() {
         let buffer = SupportedBufferSize::Range { min: 64, max: 512 };
         let ranges = [range(SampleFormat::F32, 96_000, 44_100, buffer)];
-        assert!(pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).is_none());
+        assert!(pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).is_empty());
     }
 }
