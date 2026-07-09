@@ -1,8 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
-use distortion::bridge::{mlc_zero_v::MlcZeroVProcessor, ExternalProcessor, NeuralProcessor};
-use distortion::core::cabinet::{CabinetEngine, CabinetLibrary, CabinetMailbox, CabinetRuntime};
-use distortion::core::dsp::{AnalyzerDsp, PeakLimiter, FFT_SIZE};
+use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
+use distortion::core::dsp::{AnalyzerDsp, AudioSnapshot, StandalonePipeline, FFT_SIZE};
 use distortion::core::state::plugin_params::{
     AmpModel, ClipType, MlcAdaaOrder, MlcBright, MlcFeedback, MlcGatePos, MlcTab, MlcTsModel,
     MlcTubeModel,
@@ -12,9 +11,8 @@ use nih_plug::prelude::Enum;
 use distortion::core::ui::{draw_lab_panel, LabUiState};
 use distortion::core::ui::{render_shared_panels, ActivePanel};
 #[cfg(feature = "lab")]
-use distortion::lab::{default_categories, Lab, PipelineManager};
+use distortion::lab::Lab;
 use eframe::egui;
-use fft_convolver::FFTConvolver;
 use rtrb::{Consumer, RingBuffer};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -27,8 +25,6 @@ const DEFAULT_CABINET_IR: &[u8] = include_bytes!("../../neural/drive/cabinet_ir.
 /// Pre-EQ (tone-stack) IR embedded in the standalone binary. Replaces the old
 /// hardcoded absolute path so the linear pre-EQ stage no longer depends on a file.
 const DEFAULT_PRE_EQ_IR: &[u8] = include_bytes!("../../neural/drive/pre_eq_ir.wav");
-
-const CROSSFADE_LEN: usize = 480;
 
 #[cfg(feature = "lab")]
 fn lab_data_dir() -> Result<std::path::PathBuf, distortion::lab::LabError> {
@@ -203,78 +199,6 @@ impl Default for StandaloneState {
     }
 }
 
-/// Copy-able subset of [`StandaloneState`] read by the audio callback, so the
-/// audio thread never clones the `cab_active_hash` String (no heap allocation).
-#[derive(Clone, Copy)]
-struct AudioSnapshot {
-    eq_active: bool,
-    eq_low_freq: f32,
-    eq_low_gain: f32,
-    eq_low_q: f32,
-    eq_mid_freq: f32,
-    eq_mid_gain: f32,
-    eq_mid_q: f32,
-    eq_high_freq: f32,
-    eq_high_gain: f32,
-    eq_high_q: f32,
-    neural_active: bool,
-    neural_drive: f32,
-    neural_output_gain: f32,
-    neural_amp_volume: f32,
-    amp_model: AmpModel,
-    mlc_gain: f32,
-    mlc_master: f32,
-    mlc_bass: f32,
-    mlc_middle: f32,
-    mlc_treble: f32,
-    mlc_presence: f32,
-    mlc_depth: f32,
-    mlc_gate: f32,
-    mlc_bright: MlcBright,
-    mlc_m45: bool,
-    mlc_warclaw: bool,
-    mlc_feedback: MlcFeedback,
-    mlc_gate_pos: MlcGatePos,
-    mlc_clip_type1: ClipType,
-    mlc_clip_type2: ClipType,
-    mlc_clip_type3: ClipType,
-    mlc_clean_blend: f32,
-    mlc_sag: f32,
-    mlc_h2: f32,
-    mlc_h3: f32,
-    mlc_h4: f32,
-    mlc_tight: bool,
-    mlc_asymmetry_enable: bool,
-    mlc_asymmetry: f32,
-    mlc_preshape: bool,
-    mlc_preshape_tight: f32,
-    mlc_preshape_bite: f32,
-    mlc_ts_model: MlcTsModel,
-    mlc_tube_model: MlcTubeModel,
-    mlc_tube_drive: f32,
-    mlc_tube_bypass: bool,
-    mlc_nfb_presence: f32,
-    mlc_nfb_resonance: f32,
-    mlc_nfb_depth: f32,
-    mlc_nfb_bypass: bool,
-    mlc_mbc_bypass: bool,
-    mlc_mbc_cf_lo: f32,
-    mlc_mbc_cf_hi: f32,
-    mlc_mbc_drive_lo: f32,
-    mlc_mbc_drive_mid: f32,
-    mlc_mbc_drive_hi: f32,
-    mlc_adaa_order: MlcAdaaOrder,
-    eq_tanh_bypass: bool,
-    gain: f32,
-    bypass: bool,
-    cabinet_bypass: bool,
-    cabinet_level: f32,
-    cabinet_mix: f32,
-    limiter_enable: bool,
-    limiter_ceiling: f32,
-    limiter_release: f32,
-}
-
 impl StandaloneState {
     fn audio(&self) -> AudioSnapshot {
         AudioSnapshot {
@@ -344,151 +268,6 @@ impl StandaloneState {
             limiter_enable: self.limiter_enable,
             limiter_ceiling: self.limiter_ceiling,
             limiter_release: self.limiter_release,
-        }
-    }
-}
-
-impl Default for AudioSnapshot {
-    fn default() -> Self {
-        StandaloneState::default().audio()
-    }
-}
-
-#[inline(always)]
-fn process_standalone_amp(
-    amp_model: AmpModel,
-    snap: &AudioSnapshot,
-    neural_amp_l: &mut NeuralProcessor,
-    neural_amp_r: &mut NeuralProcessor,
-    mlc_l: &mut Option<MlcZeroVProcessor>,
-    mlc_r: &mut Option<MlcZeroVProcessor>,
-    buf_l: &mut [f32],
-    buf_r: &mut [f32],
-) {
-    match amp_model {
-        AmpModel::Neural => {
-            if snap.neural_active {
-                neural_amp_l.set_drive(snap.neural_drive);
-                neural_amp_l.set_output_gain(snap.neural_output_gain);
-                neural_amp_l.process_block(buf_l.as_mut_ptr(), buf_l.len());
-
-                neural_amp_r.set_drive(snap.neural_drive);
-                neural_amp_r.set_output_gain(snap.neural_output_gain);
-                neural_amp_r.process_block(buf_r.as_mut_ptr(), buf_r.len());
-            }
-        }
-        AmpModel::MlcZeroV => {
-            let bright = match snap.mlc_bright {
-                MlcBright::I => 0.0,
-                MlcBright::Ii => 1.0,
-            };
-            let feedback = match snap.mlc_feedback {
-                MlcFeedback::Lo => 0.0,
-                MlcFeedback::Hi => 1.0,
-            };
-            let gate_pos = match snap.mlc_gate_pos {
-                MlcGatePos::Pre => 0.0,
-                MlcGatePos::Post => 1.0,
-            };
-            let clip_type1 = snap.mlc_clip_type1.as_f32();
-            let clip_type2 = snap.mlc_clip_type2.as_f32();
-            let clip_type3 = snap.mlc_clip_type3.as_f32();
-            let tight = if snap.mlc_tight { 1.0 } else { 0.0 };
-            let asymmetry_enable = if snap.mlc_asymmetry_enable { 1.0 } else { 0.0 };
-            let preshape = if snap.mlc_preshape { 1.0 } else { 0.0 };
-            let ts_model = snap.mlc_ts_model.as_f32();
-            let tube_model = snap.mlc_tube_model.as_f32();
-            let adaa_order = snap.mlc_adaa_order.as_f32();
-            if let Some(mlc) = mlc_l {
-                mlc.set_gain(snap.mlc_gain);
-                mlc.set_master(snap.mlc_master);
-                mlc.set_bass(snap.mlc_bass);
-                mlc.set_middle(snap.mlc_middle);
-                mlc.set_treble(snap.mlc_treble);
-                mlc.set_presence(snap.mlc_presence);
-                mlc.set_depth(snap.mlc_depth);
-                mlc.set_gate(snap.mlc_gate);
-                mlc.set_bright(bright);
-                mlc.set_m45(snap.mlc_m45);
-                mlc.set_warclaw(snap.mlc_warclaw);
-                mlc.set_feedback(feedback);
-                mlc.set_gate_pos(gate_pos);
-                mlc.set_clip_type1(clip_type1);
-                mlc.set_clip_type2(clip_type2);
-                mlc.set_clip_type3(clip_type3);
-                mlc.set_tight(tight);
-                mlc.set_asymmetry_enable(asymmetry_enable);
-                mlc.set_asymmetry(snap.mlc_asymmetry);
-                mlc.set_preshape(preshape);
-                mlc.set_preshape_tight(snap.mlc_preshape_tight);
-                mlc.set_preshape_bite(snap.mlc_preshape_bite);
-                mlc.set_clean_blend(snap.mlc_clean_blend);
-                mlc.set_sag(snap.mlc_sag);
-                mlc.set_h2(snap.mlc_h2);
-                mlc.set_h3(snap.mlc_h3);
-                mlc.set_h4(snap.mlc_h4);
-                mlc.set_ts_model(ts_model);
-                mlc.set_tube_model(tube_model);
-                mlc.set_tube_drive(snap.mlc_tube_drive);
-                mlc.set_tube_bypass(snap.mlc_tube_bypass);
-                mlc.set_nfb_presence(snap.mlc_nfb_presence);
-                mlc.set_nfb_resonance(snap.mlc_nfb_resonance);
-                mlc.set_nfb_depth(snap.mlc_nfb_depth);
-                mlc.set_nfb_bypass(snap.mlc_nfb_bypass);
-                mlc.set_mbc_bypass(snap.mlc_mbc_bypass);
-                mlc.set_mbc_cf_lo(snap.mlc_mbc_cf_lo);
-                mlc.set_mbc_cf_hi(snap.mlc_mbc_cf_hi);
-                mlc.set_mbc_drive_lo(snap.mlc_mbc_drive_lo);
-                mlc.set_mbc_drive_mid(snap.mlc_mbc_drive_mid);
-                mlc.set_mbc_drive_hi(snap.mlc_mbc_drive_hi);
-                mlc.set_adaa_order(adaa_order);
-                mlc.process_block(buf_l.as_mut_ptr(), buf_l.len());
-            }
-            if let Some(mlc) = mlc_r {
-                mlc.set_gain(snap.mlc_gain);
-                mlc.set_master(snap.mlc_master);
-                mlc.set_bass(snap.mlc_bass);
-                mlc.set_middle(snap.mlc_middle);
-                mlc.set_treble(snap.mlc_treble);
-                mlc.set_presence(snap.mlc_presence);
-                mlc.set_depth(snap.mlc_depth);
-                mlc.set_gate(snap.mlc_gate);
-                mlc.set_bright(bright);
-                mlc.set_m45(snap.mlc_m45);
-                mlc.set_warclaw(snap.mlc_warclaw);
-                mlc.set_feedback(feedback);
-                mlc.set_gate_pos(gate_pos);
-                mlc.set_clip_type1(clip_type1);
-                mlc.set_clip_type2(clip_type2);
-                mlc.set_clip_type3(clip_type3);
-                mlc.set_tight(tight);
-                mlc.set_asymmetry_enable(asymmetry_enable);
-                mlc.set_asymmetry(snap.mlc_asymmetry);
-                mlc.set_preshape(preshape);
-                mlc.set_preshape_tight(snap.mlc_preshape_tight);
-                mlc.set_preshape_bite(snap.mlc_preshape_bite);
-                mlc.set_clean_blend(snap.mlc_clean_blend);
-                mlc.set_sag(snap.mlc_sag);
-                mlc.set_h2(snap.mlc_h2);
-                mlc.set_h3(snap.mlc_h3);
-                mlc.set_h4(snap.mlc_h4);
-                mlc.set_ts_model(ts_model);
-                mlc.set_tube_model(tube_model);
-                mlc.set_tube_drive(snap.mlc_tube_drive);
-                mlc.set_tube_bypass(snap.mlc_tube_bypass);
-                mlc.set_nfb_presence(snap.mlc_nfb_presence);
-                mlc.set_nfb_resonance(snap.mlc_nfb_resonance);
-                mlc.set_nfb_depth(snap.mlc_nfb_depth);
-                mlc.set_nfb_bypass(snap.mlc_nfb_bypass);
-                mlc.set_mbc_bypass(snap.mlc_mbc_bypass);
-                mlc.set_mbc_cf_lo(snap.mlc_mbc_cf_lo);
-                mlc.set_mbc_cf_hi(snap.mlc_mbc_cf_hi);
-                mlc.set_mbc_drive_lo(snap.mlc_mbc_drive_lo);
-                mlc.set_mbc_drive_mid(snap.mlc_mbc_drive_mid);
-                mlc.set_mbc_drive_hi(snap.mlc_mbc_drive_hi);
-                mlc.set_adaa_order(adaa_order);
-                mlc.process_block(buf_r.as_mut_ptr(), buf_r.len());
-            }
         }
     }
 }
@@ -745,15 +524,6 @@ fn audio_worker(
                     (None, None)
                 };
 
-                // Processadores Neurais (L/R) — backend resolvido por capacidade (have_mojo)
-                let mut neural_amp_l = NeuralProcessor::new();
-                let mut neural_amp_r = NeuralProcessor::new();
-                neural_amp_l.init(44100.0);
-                neural_amp_r.init(44100.0);
-                neural_amp_l.set_drive(2.0);
-                neural_amp_l.set_output_gain(0.5);
-                neural_amp_r.set_drive(2.0);
-                neural_amp_r.set_output_gain(0.5);
                 let state_clone = standalone_state.clone();
 
                 if let Ok(host) = cpal::host_from_id(host_id) {
@@ -776,56 +546,12 @@ fn audio_worker(
                                             // INICIALIZAÇÃO DSP: Fora do loop de processamento!
                                             // Pegamos o sample_rate do config e inicializamos uma única vez
                                             let s_rate = strict_config.sample_rate.0 as f32;
-
-                                            // Faust
-                                            let mut local_faust_l =
-                                                distortion::bridge::faust::FaustProcessor::new();
-                                            let mut local_faust_r =
-                                                distortion::bridge::faust::FaustProcessor::new();
-                                            if let Some(f) = &mut local_faust_l {
-                                                f.init(s_rate);
-                                            }
-                                            if let Some(f) = &mut local_faust_r {
-                                                f.init(s_rate);
-                                            }
-
-                                            // Mojo (Substituindo o dummy que estava fora do loop antes)
-                                            neural_amp_l.init(s_rate);
-                                            neural_amp_r.init(s_rate);
-
-                                            let mut mlc_l = MlcZeroVProcessor::new();
-                                            let mut mlc_r = MlcZeroVProcessor::new();
-                                            if let Some(mlc) = &mut mlc_l {
-                                                mlc.init(s_rate);
-                                            }
-                                            if let Some(mlc) = &mut mlc_r {
-                                                mlc.init(s_rate);
-                                            }
-
-                                            // Brickwall limiter (estágio final, após master gain).
-                                            let mut limiter = PeakLimiter::new(-1.0, 50.0, s_rate);
-
-                                            let mut pre_eq_l = FFTConvolver::default();
-                                            let mut pre_eq_r = FFTConvolver::default();
-
-                                            // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
-                                            if let Some(ir) = decode_wav_flat(DEFAULT_PRE_EQ_IR) {
-                                                if !ir.is_empty() {
-                                                    let _ =
-                                                        pre_eq_l.init(buffer_size as usize, &ir);
-                                                    let _ =
-                                                        pre_eq_r.init(buffer_size as usize, &ir);
-                                                }
-                                            }
+                                            let max_block = buffer_size as usize;
 
                                             // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
                                             cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
                                             cabinet_max_block
-                                                .store(buffer_size as usize, Ordering::Relaxed);
-                                            let mut cabinet_engine = CabinetEngine::with_mailbox(
-                                                cabinet_mailbox.clone(),
-                                            );
-                                            cabinet_engine.set_sample_rate(s_rate);
+                                                .store(max_block, Ordering::Relaxed);
                                             {
                                                 // Resolver o IR ativo e publicar um runtime para este sample rate.
                                                 let mut hash = state_clone
@@ -850,7 +576,7 @@ fn audio_worker(
                                                             if let Ok(rt) = CabinetRuntime::build(
                                                                 &bytes,
                                                                 s_rate,
-                                                                buffer_size as usize,
+                                                                max_block,
                                                             ) {
                                                                 cabinet_mailbox.publish(rt);
                                                             }
@@ -859,21 +585,20 @@ fn audio_worker(
                                                 }
                                             }
 
+                                            // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
+                                            let pre_eq_ir =
+                                                decode_wav_flat(DEFAULT_PRE_EQ_IR).unwrap_or_default();
+
+                                            let mut pipeline = StandalonePipeline::new(
+                                                s_rate,
+                                                max_block,
+                                                &pre_eq_ir,
+                                                cabinet_mailbox.clone(),
+                                            );
+
                                             // Buffers temporários para processamento in-place em bloco
                                             let mut buf_l = vec![0.0; buffer_size as usize];
                                             let mut buf_r = vec![0.0; buffer_size as usize];
-                                            let mut temp_l = vec![0.0; buffer_size as usize];
-                                            let mut temp_r = vec![0.0; buffer_size as usize];
-                                            let mut previous_amp_model = AmpModel::Neural;
-                                            let mut crossfade_sample = CROSSFADE_LEN;
-                                            let mut crossfade_buf =
-                                                vec![vec![0.0; buffer_size as usize]; 2];
-                                            #[cfg(feature = "lab")]
-                                            let mut lab_pipeline =
-                                                PipelineManager::from_categories(
-                                                    &default_categories(),
-                                                )
-                                                .ok();
 
                                             device.build_input_stream(
                                                 &strict_config,
@@ -907,245 +632,14 @@ fn audio_worker(
                                                             .unwrap_or(0.0);
                                                     }
 
-                                                    // 2. Processamento DSP em Bloco
-                                                    if !snap.bypass {
-                                                        // A) Faust EQ (processa os dois canais num único array de ponteiros - se a API local_faust aguentar)
-                                                        // A nossa interface Faust process_block aplica a um array plano in-place
-                                                        if snap.eq_active {
-                                                            if let Some(f) = &mut local_faust_l {
-                                                                f.set_eq_params(
-                                                                    snap.eq_low_freq,
-                                                                    snap.eq_low_gain,
-                                                                    snap.eq_low_q,
-                                                                    snap.eq_mid_freq,
-                                                                    snap.eq_mid_gain,
-                                                                    snap.eq_mid_q,
-                                                                    snap.eq_high_freq,
-                                                                    snap.eq_high_gain,
-                                                                    snap.eq_high_q,
-                                                                );
-                                                                f.set_eq_tanh_bypass(
-                                                                    snap.eq_tanh_bypass,
-                                                                );
-                                                                f.process_block(
-                                                                    buf_l.as_mut_ptr(),
-                                                                    max_len,
-                                                                );
-                                                            }
-                                                            if let Some(f) = &mut local_faust_r {
-                                                                f.set_eq_params(
-                                                                    snap.eq_low_freq,
-                                                                    snap.eq_low_gain,
-                                                                    snap.eq_low_q,
-                                                                    snap.eq_mid_freq,
-                                                                    snap.eq_mid_gain,
-                                                                    snap.eq_mid_q,
-                                                                    snap.eq_high_freq,
-                                                                    snap.eq_high_gain,
-                                                                    snap.eq_high_q,
-                                                                );
-                                                                f.set_eq_tanh_bypass(
-                                                                    snap.eq_tanh_bypass,
-                                                                );
-                                                                f.process_block(
-                                                                    buf_r.as_mut_ptr(),
-                                                                    max_len,
-                                                                );
-                                                            }
-                                                        }
-
-                                                        // B) Wiener-Hammerstein Gray-Box
-                                                        // ESTÁGIO 1: PRÉ-EQUALIZAÇÃO LTI (Tone Stack) // Somente se válido
-                                                        // Precisamos proteger contra uninit calls de arrays zerados. Se array não for vazio, tem certeza q inicializou.
-                                                        // Porém, falhas no convolver geram f32 zerados.
-                                                        temp_l[..max_len]
-                                                            .copy_from_slice(&buf_l[..max_len]);
-                                                        temp_r[..max_len]
-                                                            .copy_from_slice(&buf_r[..max_len]);
-                                                        if pre_eq_l
-                                                            .process(
-                                                                &temp_l[..max_len],
-                                                                &mut buf_l[..max_len],
-                                                            )
-                                                            .is_err()
-                                                        {
-                                                            buf_l[..max_len].copy_from_slice(
-                                                                &temp_l[..max_len],
-                                                            );
-                                                        }
-                                                        if pre_eq_r
-                                                            .process(
-                                                                &temp_r[..max_len],
-                                                                &mut buf_r[..max_len],
-                                                            )
-                                                            .is_err()
-                                                        {
-                                                            buf_r[..max_len].copy_from_slice(
-                                                                &temp_r[..max_len],
-                                                            );
-                                                        }
-
-                                                        // ESTÁGIO 3: Modelo de amp selecionado
-                                                        if snap.amp_model != previous_amp_model
-                                                            && crossfade_sample >= CROSSFADE_LEN
-                                                        {
-                                                            crossfade_sample = 0;
-                                                        } else if snap.amp_model
-                                                            == previous_amp_model
-                                                            && crossfade_sample < CROSSFADE_LEN
-                                                        {
-                                                            crossfade_sample = CROSSFADE_LEN;
-                                                        }
-                                                        let crossfade_start = crossfade_sample;
-                                                        let crossfading = snap.amp_model
-                                                            != previous_amp_model
-                                                            && crossfade_start < CROSSFADE_LEN;
-
-                                                        if crossfading {
-                                                            temp_l[..max_len]
-                                                                .copy_from_slice(&buf_l[..max_len]);
-                                                            temp_r[..max_len]
-                                                                .copy_from_slice(&buf_r[..max_len]);
-
-                                                            process_standalone_amp(
-                                                                previous_amp_model,
-                                                                &snap,
-                                                                &mut neural_amp_l,
-                                                                &mut neural_amp_r,
-                                                                &mut mlc_l,
-                                                                &mut mlc_r,
-                                                                &mut buf_l[..max_len],
-                                                                &mut buf_r[..max_len],
-                                                            );
-                                                            crossfade_buf[0][..max_len]
-                                                                .copy_from_slice(&buf_l[..max_len]);
-                                                            crossfade_buf[1][..max_len]
-                                                                .copy_from_slice(&buf_r[..max_len]);
-
-                                                            buf_l[..max_len].copy_from_slice(
-                                                                &temp_l[..max_len],
-                                                            );
-                                                            buf_r[..max_len].copy_from_slice(
-                                                                &temp_r[..max_len],
-                                                            );
-
-                                                            process_standalone_amp(
-                                                                snap.amp_model,
-                                                                &snap,
-                                                                &mut neural_amp_l,
-                                                                &mut neural_amp_r,
-                                                                &mut mlc_l,
-                                                                &mut mlc_r,
-                                                                &mut buf_l[..max_len],
-                                                                &mut buf_r[..max_len],
-                                                            );
-
-                                                            for i in 0..max_len {
-                                                                let fade_pos = (crossfade_start
-                                                                    + i)
-                                                                    .min(CROSSFADE_LEN);
-                                                                let t = fade_pos as f32
-                                                                    / CROSSFADE_LEN as f32;
-                                                                let old_l = crossfade_buf[0][i];
-                                                                let old_r = crossfade_buf[1][i];
-                                                                buf_l[i] =
-                                                                    old_l + (buf_l[i] - old_l) * t;
-                                                                buf_r[i] =
-                                                                    old_r + (buf_r[i] - old_r) * t;
-                                                            }
-
-                                                            crossfade_sample = (crossfade_start
-                                                                + max_len)
-                                                                .min(CROSSFADE_LEN);
-                                                            if crossfade_sample >= CROSSFADE_LEN {
-                                                                previous_amp_model = snap.amp_model;
-                                                            }
-                                                        } else {
-                                                            process_standalone_amp(
-                                                                snap.amp_model,
-                                                                &snap,
-                                                                &mut neural_amp_l,
-                                                                &mut neural_amp_r,
-                                                                &mut mlc_l,
-                                                                &mut mlc_r,
-                                                                &mut buf_l[..max_len],
-                                                                &mut buf_r[..max_len],
-                                                            );
-                                                        }
-
-                                                        // ESTÁGIO 4: GABINETE (Cabinet IR gerenciado — troca em runtime via ArcSwap)
-                                                        cabinet_engine.process(
-                                                            &mut buf_l[..max_len],
-                                                            &mut buf_r[..max_len],
-                                                            &mut temp_l[..max_len],
-                                                            &mut temp_r[..max_len],
-                                                            snap.cabinet_bypass,
-                                                            snap.cabinet_level,
-                                                            snap.cabinet_mix,
-                                                        );
-
-                                                        // ESTÁGIO 5: Ganho Master
-                                                        for l in &mut buf_l[..max_len] {
-                                                            *l *= snap.gain;
-                                                        }
-                                                        for r in &mut buf_r[..max_len] {
-                                                            *r *= snap.gain;
-                                                        }
-
-                                                        // ESTÁGIO 6: Volume Master Neural (após processamento)
-                                                        if snap.amp_model == AmpModel::Neural
-                                                            && snap.neural_active
-                                                        {
-                                                            for l in &mut buf_l[..max_len] {
-                                                                *l *= snap.neural_amp_volume;
-                                                            }
-                                                            for r in &mut buf_r[..max_len] {
-                                                                *r *= snap.neural_amp_volume;
-                                                            }
-                                                        }
-
-                                                        #[cfg(feature = "lab")]
-                                                        if let Some(pipeline) =
-                                                            lab_pipeline.as_mut()
-                                                        {
-                                                            pipeline.process_block(
-                                                                buf_l.as_mut_ptr(),
-                                                                max_len,
-                                                            );
-                                                            pipeline.process_block(
-                                                                buf_r.as_mut_ptr(),
-                                                                max_len,
-                                                            );
-                                                        }
-
-                                                        // ESTÁGIO: Brickwall Limiter (após master
-                                                        // gain, antes do saneamento NaN).
-                                                        if snap.limiter_enable {
-                                                            limiter.set_params(
-                                                                snap.limiter_ceiling,
-                                                                snap.limiter_release,
-                                                                s_rate,
-                                                            );
-                                                            for l in &mut buf_l[..max_len] {
-                                                                *l = limiter.process(*l);
-                                                            }
-                                                            for r in &mut buf_r[..max_len] {
-                                                                *r = limiter.process(*r);
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // ESTÁGIO 7: Saneamento de NaN/Infinito (SEMPRE executado, mesmo em bypass)
-                                                    for l in &mut buf_l[..max_len] {
-                                                        if l.is_nan() || l.is_infinite() {
-                                                            *l = 0.0;
-                                                        }
-                                                    }
-                                                    for r in &mut buf_r[..max_len] {
-                                                        if r.is_nan() || r.is_infinite() {
-                                                            *r = 0.0;
-                                                        }
-                                                    }
+                                                    // 2. Processamento DSP em Bloco (Faust EQ, pre-EQ,
+                                                    // amp model + crossfade, cabinet, ganho master,
+                                                    // lab pipeline, limiter, saneamento NaN/Inf).
+                                                    pipeline.process(
+                                                        &mut buf_l[..max_len],
+                                                        &mut buf_r[..max_len],
+                                                        &snap,
+                                                    );
 
                                                     // 3. Enviar para Output da Interface e Analisador Gráfico
                                                     for i in 0..max_len {
