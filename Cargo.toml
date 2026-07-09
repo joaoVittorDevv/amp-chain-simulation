@@ -19,7 +19,6 @@ path = "src/bin/standalone.rs"
 
 [dependencies]
 arc-swap = "1.7.1"
-cpal = "0.15.2"
 eframe = "0.31.0"
 hound = "3.5.1"
 nih_plug = { git = "https://github.com/robbert-vdh/nih-plug.git", features = ["standalone"] }
@@ -45,6 +44,15 @@ uuid = { version = "1", features = ["v4", "serde"], optional = true }
 flate2 = { version = "1", optional = true }
 tar = { version = "0.4", optional = true }
 
+# The two declarations are intentionally identical: the split exists so Windows-only
+# cpal configuration (see the `asio` feature) can be added here without disturbing
+# the other platforms. Keep both entries even though they look redundant.
+[target.'cfg(target_os = "windows")'.dependencies]
+cpal = { version = "0.15.2" }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+cpal = "0.15.2"
+
 [features]
 default = ["lab", "nih-plug-assert"]
 lab = ["dep:sha2", "dep:semver", "dep:chrono", "dep:uuid", "dep:flate2", "dep:tar"]
@@ -55,6 +63,10 @@ lab = ["dep:sha2", "dep:semver", "dep:chrono", "dep:uuid", "dep:flate2", "dep:ta
 # not this crate's, and Cargo features aren't visible across the dependency
 # boundary without an explicit forwarding feature like this one.
 nih-plug-assert = ["nih_plug/assert_process_allocs"]
+# Must stay out of `default`: enabling this makes the ASIO SDK (`ASIO_DIR`) and
+# `LIBCLANG_PATH` hard build requirements, which CI does not have. cpal declares
+# `asio-sys` only under `cfg(target_os = "windows")`, so this is inert elsewhere.
+asio = ["cpal/asio"]
 
 [profile.release]
 lto = "thin"
