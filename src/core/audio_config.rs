@@ -106,6 +106,49 @@ pub fn pick_from_ranges(
     candidates.into_iter().map(|(_, cfg)| cfg).collect()
 }
 
+/// The best configs among `ranges` that can actually run at `rate`.
+///
+/// Ranges that do not span `rate` are discarded rather than clamped, so every
+/// returned config carries exactly `rate`. This is what lets full duplex commit
+/// to one rate for both directions.
+pub fn pick_at_rate(
+    ranges: &[SupportedStreamConfigRange],
+    rate: SampleRate,
+    default_channels: u16,
+    allowed: &[SampleFormat],
+) -> Vec<PickedConfig> {
+    let spanning: Vec<_> = ranges
+        .iter()
+        .filter(|r| spans(r, rate.0))
+        .cloned()
+        .collect();
+    pick_from_ranges(&spanning, rate, default_channels, allowed)
+}
+
+/// Every config range `device` advertises for `dir`, or empty if it cannot say.
+pub fn supported_ranges(device: &Device, dir: StreamDirection) -> Vec<SupportedStreamConfigRange> {
+    match dir {
+        StreamDirection::Input => device
+            .supported_input_configs()
+            .map(Iterator::collect)
+            .unwrap_or_default(),
+        StreamDirection::Output => device
+            .supported_output_configs()
+            .map(Iterator::collect)
+            .unwrap_or_default(),
+    }
+}
+
+fn default_config(
+    device: &Device,
+    dir: StreamDirection,
+) -> Result<SupportedStreamConfig, cpal::DefaultStreamConfigError> {
+    match dir {
+        StreamDirection::Input => device.default_input_config(),
+        StreamDirection::Output => device.default_output_config(),
+    }
+}
+
 /// Negotiate stream configs for `device`, sorted by preference (best first).
 ///
 /// Tries enumeration first. Falls back to `default_*_config()` only when the
@@ -115,110 +158,255 @@ pub fn pick_config(
     device: &Device,
     dir: StreamDirection,
 ) -> Result<Vec<PickedConfig>, cpal::DefaultStreamConfigError> {
-    // Try enumeration first (Issue 2 fix)
-    let ranges: Vec<SupportedStreamConfigRange> = match dir {
-        StreamDirection::Input => device
-            .supported_input_configs()
-            .map(Iterator::collect)
-            .unwrap_or_default(),
-        StreamDirection::Output => device
-            .supported_output_configs()
-            .map(Iterator::collect)
-            .unwrap_or_default(),
-    };
+    let ranges = supported_ranges(device, dir);
 
-    // If enumeration succeeded and we have candidates, use them
     if !ranges.is_empty() {
-        // We need a default to use as preference hint, but try enumeration first
-        let default_result = match dir {
-            StreamDirection::Input => device.default_input_config(),
-            StreamDirection::Output => device.default_output_config(),
-        };
-
-        let (default_sr, default_ch) = match default_result {
+        let (default_sr, default_ch) = match default_config(device, dir) {
             Ok(def) => (def.sample_rate(), def.channels()),
-            // If no default available, use reasonable hints
+            // No default to rank against; assume the CD-era stereo norm.
             Err(_) => (SampleRate(48_000), 2),
         };
 
         let picked = pick_from_ranges(&ranges, default_sr, default_ch, dir.formats());
-
         if !picked.is_empty() {
             return Ok(picked);
         }
     }
 
-    // Fall back to default config only if enumeration failed or returned nothing
-    let default = match dir {
-        StreamDirection::Input => device.default_input_config()?,
-        StreamDirection::Output => device.default_output_config()?,
-    };
-
+    let default = default_config(device, dir)?;
     Ok(vec![PickedConfig {
         max_block: max_block_from(default.buffer_size()),
         config: default,
     }])
 }
 
-/// Negotiate full-duplex configs with a common sample rate (Issue 3 fix).
+/// Why a full-duplex negotiation could not settle on a shared sample rate.
+#[derive(Debug)]
+pub enum FullDuplexError {
+    /// A device reported neither an enumeration nor a default config.
+    Device(cpal::DefaultStreamConfigError),
+    /// Both devices are usable on their own, but share no sample rate. The
+    /// payloads are the inclusive `(min, max)` rate intervals each side offers
+    /// in a format the corresponding callback can handle.
+    NoCommonSampleRate {
+        input: Vec<(u32, u32)>,
+        output: Vec<(u32, u32)>,
+    },
+}
+
+impl From<cpal::DefaultStreamConfigError> for FullDuplexError {
+    fn from(err: cpal::DefaultStreamConfigError) -> Self {
+        FullDuplexError::Device(err)
+    }
+}
+
+impl std::fmt::Display for FullDuplexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FullDuplexError::Device(err) => {
+                write!(f, "device reported no usable configuration: {err}")
+            }
+            FullDuplexError::NoCommonSampleRate { input, output } => write!(
+                f,
+                "no sample rate is common to both devices (input offers {}; output offers {})",
+                format_intervals(input),
+                format_intervals(output),
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FullDuplexError {}
+
+fn format_intervals(intervals: &[(u32, u32)]) -> String {
+    if intervals.is_empty() {
+        return "nothing".to_string();
+    }
+    intervals
+        .iter()
+        .map(|(min, max)| {
+            if min == max {
+                format!("{min} Hz")
+            } else {
+                format!("{min}-{max} Hz")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn spans(range: &SupportedStreamConfigRange, rate: u32) -> bool {
+    let (min, max) = (range.min_sample_rate().0, range.max_sample_rate().0);
+    min <= max && min <= rate && rate <= max
+}
+
+/// The inclusive sample-rate intervals `ranges` offers in a format we can use.
+/// Inverted ranges are dropped, matching `pick_from_ranges`.
+fn rate_intervals(
+    ranges: &[SupportedStreamConfigRange],
+    allowed: &[SampleFormat],
+) -> Vec<(u32, u32)> {
+    ranges
+        .iter()
+        .filter(|r| allowed.contains(&r.sample_format()))
+        .map(|r| (r.min_sample_rate().0, r.max_sample_rate().0))
+        .filter(|(min, max)| min <= max)
+        .collect()
+}
+
+/// The sample rate both sides can run, closest to the input's default.
 ///
-/// Picks configs where both devices can run at the same sample rate. If no
-/// common rate exists, returns configs at the input's preferred rate and logs
-/// a warning. Returns `(input_configs, output_configs, common_sample_rate)`.
+/// The input is the master clock: the pipeline is driven from the capture
+/// callback, so a rate the input dislikes costs more than one the output
+/// dislikes. Overlaps are searched pairwise because a device advertises its
+/// rates as a set of intervals, not as one contiguous span.
+fn best_common_rate(
+    input: &[(u32, u32)],
+    output: &[(u32, u32)],
+    input_default: u32,
+    output_default: u32,
+) -> Option<u32> {
+    let mut best: Option<((u32, u32, u32), u32)> = None;
+
+    for &(in_min, in_max) in input {
+        for &(out_min, out_max) in output {
+            let low = in_min.max(out_min);
+            let high = in_max.min(out_max);
+            if low > high {
+                continue;
+            }
+            // Both defaults are worth trying: the input's is the primary
+            // preference, but when it falls outside the overlap the output's
+            // clamped default is often a rate the hardware genuinely runs.
+            for candidate in [
+                input_default.clamp(low, high),
+                output_default.clamp(low, high),
+            ] {
+                let key = (
+                    candidate.abs_diff(input_default),
+                    candidate.abs_diff(output_default),
+                    candidate,
+                );
+                if best.as_ref().is_none_or(|(best_key, _)| key < *best_key) {
+                    best = Some((key, candidate));
+                }
+            }
+        }
+    }
+
+    best.map(|(_, rate)| rate)
+}
+
+/// One side of a full-duplex negotiation, reduced to what the search needs.
+struct DuplexSide {
+    ranges: Vec<SupportedStreamConfigRange>,
+    intervals: Vec<(u32, u32)>,
+    default_rate: u32,
+    default_channels: u16,
+    /// Set when the device could not enumerate anything usable, in which case
+    /// its `default_*_config()` is the only config we may open it with.
+    fallback: Option<PickedConfig>,
+}
+
+fn duplex_side(
+    device: &Device,
+    dir: StreamDirection,
+) -> Result<DuplexSide, cpal::DefaultStreamConfigError> {
+    let ranges = supported_ranges(device, dir);
+    let intervals = rate_intervals(&ranges, dir.formats());
+
+    if intervals.is_empty() {
+        // Mirrors `pick_config`'s fallback: a device that enumerates nothing we
+        // can build gets exactly one config, at exactly one rate.
+        let default = default_config(device, dir)?;
+        let rate = default.sample_rate().0;
+        return Ok(DuplexSide {
+            ranges: Vec::new(),
+            intervals: vec![(rate, rate)],
+            default_rate: rate,
+            default_channels: default.channels(),
+            fallback: Some(PickedConfig {
+                max_block: max_block_from(default.buffer_size()),
+                config: default,
+            }),
+        });
+    }
+
+    let (default_rate, default_channels) = match default_config(device, dir) {
+        Ok(def) => (def.sample_rate().0, def.channels()),
+        Err(_) => (48_000, 2),
+    };
+
+    Ok(DuplexSide {
+        ranges,
+        intervals,
+        default_rate,
+        default_channels,
+        fallback: None,
+    })
+}
+
+/// Negotiate full-duplex configs that share one sample rate.
+///
+/// The search runs over the devices' *raw* advertised rate intervals, not over
+/// configs each device already narrowed to its own default. Two devices that
+/// both span `44100-96000` but default to `48000` and `44100` respectively do
+/// have common rates; collapsing each to its default first would hide that.
+///
+/// Returns `(input_configs, output_configs, common_sample_rate)`, both lists
+/// sorted best-first and every config carrying `common_sample_rate`. Never
+/// returns a rate mismatch: when no rate is common, this is an error, and the
+/// caller must not open the streams.
 pub fn pick_full_duplex(
     input_device: &Device,
     output_device: &Device,
-) -> Result<(Vec<PickedConfig>, Vec<PickedConfig>, SampleRate), cpal::DefaultStreamConfigError> {
-    let input_configs = pick_config(input_device, StreamDirection::Input)?;
-    let output_configs = pick_config(output_device, StreamDirection::Output)?;
+) -> Result<(Vec<PickedConfig>, Vec<PickedConfig>, SampleRate), FullDuplexError> {
+    let input = duplex_side(input_device, StreamDirection::Input)?;
+    let output = duplex_side(output_device, StreamDirection::Output)?;
 
-    if input_configs.is_empty() || output_configs.is_empty() {
-        return Err(cpal::DefaultStreamConfigError::StreamTypeNotSupported);
-    }
-
-    // Build a set of sample rates both devices support
-    let input_rates: std::collections::HashSet<u32> = input_configs
-        .iter()
-        .map(|cfg| cfg.config.sample_rate().0)
-        .collect();
-    let output_rates: std::collections::HashSet<u32> = output_configs
-        .iter()
-        .map(|cfg| cfg.config.sample_rate().0)
-        .collect();
-
-    let common_rates: Vec<u32> = input_rates.intersection(&output_rates).copied().collect();
-
-    let selected_rate = if !common_rates.is_empty() {
-        // Prefer the input's best rate if it's in the common set
-        let input_best_rate = input_configs[0].config.sample_rate().0;
-        if common_rates.contains(&input_best_rate) {
-            SampleRate(input_best_rate)
-        } else {
-            // Otherwise pick the highest common rate
-            SampleRate(*common_rates.iter().max().unwrap())
-        }
-    } else {
-        // No common rate: use input's preferred rate and warn
-        let input_rate = input_configs[0].config.sample_rate();
-        eprintln!(
-            "⚠ Warning: Input and output devices have no common sample rate. \
-             Using input rate {} Hz — output may fail to open.",
-            input_rate.0
-        );
-        input_rate
+    let no_common = || FullDuplexError::NoCommonSampleRate {
+        input: input.intervals.clone(),
+        output: output.intervals.clone(),
     };
 
-    // Filter configs to only those matching the selected rate
-    let in_filtered: Vec<_> = input_configs
-        .into_iter()
-        .filter(|cfg| cfg.config.sample_rate() == selected_rate)
-        .collect();
-    let out_filtered: Vec<_> = output_configs
-        .into_iter()
-        .filter(|cfg| cfg.config.sample_rate() == selected_rate)
-        .collect();
+    let rate = best_common_rate(
+        &input.intervals,
+        &output.intervals,
+        input.default_rate,
+        output.default_rate,
+    )
+    .ok_or_else(no_common)?;
+    let rate = SampleRate(rate);
 
-    Ok((in_filtered, out_filtered, selected_rate))
+    let input_configs = match input.fallback.clone() {
+        Some(picked) => vec![picked],
+        None => pick_at_rate(
+            &input.ranges,
+            rate,
+            input.default_channels,
+            StreamDirection::Input.formats(),
+        ),
+    };
+    let output_configs = match output.fallback.clone() {
+        Some(picked) => vec![picked],
+        None => pick_at_rate(
+            &output.ranges,
+            rate,
+            output.default_channels,
+            StreamDirection::Output.formats(),
+        ),
+    };
+
+    if input_configs.is_empty() || output_configs.is_empty() {
+        return Err(no_common());
+    }
+
+    debug_assert!(input_configs
+        .iter()
+        .chain(&output_configs)
+        .all(|cfg| cfg.config.sample_rate() == rate));
+
+    Ok((input_configs, output_configs, rate))
 }
 
 #[cfg(test)]
@@ -391,5 +579,130 @@ mod tests {
         let buffer = SupportedBufferSize::Range { min: 64, max: 512 };
         let ranges = [range(SampleFormat::F32, 96_000, 44_100, buffer)];
         assert!(pick_from_ranges(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS).is_empty());
+    }
+
+    #[test]
+    fn full_duplex_finds_a_rate_inside_two_overlapping_ranges() {
+        // The regression: both devices span 44100-96000, but their defaults
+        // disagree (48000 vs 44100). Collapsing each side to its own default
+        // first would report no intersection; the overlap plainly has one.
+        let input = [(44_100, 96_000)];
+        let output = [(44_100, 96_000)];
+        assert_eq!(
+            best_common_rate(&input, &output, 48_000, 44_100),
+            Some(48_000),
+            "input is the master clock, so its default wins inside the overlap"
+        );
+    }
+
+    #[test]
+    fn full_duplex_clamps_the_input_default_into_the_overlap() {
+        // Input prefers 44100 but the overlap starts at 48000: take 48000
+        // rather than pretend either device can run 44100.
+        let input = [(44_100, 96_000)];
+        let output = [(48_000, 192_000)];
+        assert_eq!(
+            best_common_rate(&input, &output, 44_100, 48_000),
+            Some(48_000)
+        );
+
+        // Symmetric: the overlap ends below the input's default.
+        let input = [(44_100, 48_000)];
+        let output = [(8_000, 48_000)];
+        assert_eq!(
+            best_common_rate(&input, &output, 96_000, 8_000),
+            Some(48_000)
+        );
+    }
+
+    #[test]
+    fn full_duplex_searches_every_interval_pair() {
+        // A device advertises rates as a set of intervals, not one span. The
+        // only overlap here is the second input interval against the first
+        // output interval.
+        let input = [(8_000, 16_000), (88_200, 192_000)];
+        let output = [(96_000, 96_000), (44_100, 48_000)];
+        assert_eq!(
+            best_common_rate(&input, &output, 48_000, 96_000),
+            Some(96_000)
+        );
+    }
+
+    #[test]
+    fn full_duplex_lets_the_input_default_choose_between_two_overlaps() {
+        // Two disjoint overlaps are both reachable; the input is the master
+        // clock, so its default decides which one we commit to.
+        let input = [(44_100, 44_100), (48_000, 48_000)];
+        let output = [(44_100, 48_000)];
+        assert_eq!(
+            best_common_rate(&input, &output, 48_000, 44_100),
+            Some(48_000)
+        );
+        assert_eq!(
+            best_common_rate(&input, &output, 44_100, 48_000),
+            Some(44_100)
+        );
+    }
+
+    #[test]
+    fn full_duplex_reports_no_rate_when_the_ranges_are_disjoint() {
+        assert_eq!(
+            best_common_rate(&[(44_100, 44_100)], &[(48_000, 48_000)], 44_100, 48_000),
+            None
+        );
+        assert_eq!(
+            best_common_rate(&[(8_000, 16_000)], &[(44_100, 192_000)], 16_000, 44_100),
+            None
+        );
+        // A side with nothing usable can never intersect.
+        assert_eq!(
+            best_common_rate(&[], &[(48_000, 48_000)], 48_000, 48_000),
+            None
+        );
+    }
+
+    #[test]
+    fn rate_intervals_keeps_only_ranges_the_callback_can_build() {
+        let buffer = SupportedBufferSize::Range { min: 64, max: 512 };
+        let ranges = [
+            range(SampleFormat::F32, 44_100, 96_000, buffer),
+            range(SampleFormat::U8, 8_000, 8_000, buffer), // format we cannot build
+            range(SampleFormat::F32, 192_000, 44_100, buffer), // inverted
+            range(SampleFormat::I32, 48_000, 48_000, buffer),
+        ];
+        assert_eq!(
+            rate_intervals(&ranges, &INPUT_FORMATS),
+            vec![(44_100, 96_000), (48_000, 48_000)]
+        );
+        // The output callback has no I32 arm, so that interval must not count.
+        assert_eq!(
+            rate_intervals(&ranges, &OUTPUT_FORMATS),
+            vec![(44_100, 96_000)]
+        );
+    }
+
+    #[test]
+    fn pick_at_rate_drops_ranges_that_cannot_reach_the_rate() {
+        let buffer = SupportedBufferSize::Range { min: 64, max: 512 };
+        let ranges = [
+            fixed(SampleFormat::F32, 44_100),
+            range(SampleFormat::I16, 44_100, 96_000, buffer),
+        ];
+        // 48000 lies outside the F32 range, so the I16 range is the only one
+        // that can honour it — no silent clamp back to 44100.
+        let picked = pick_at_rate(&ranges, SampleRate(48_000), 2, &INPUT_FORMATS);
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].config.sample_rate(), SampleRate(48_000));
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::I16);
+
+        // At 44100 both qualify and the format preference decides.
+        let picked = pick_at_rate(&ranges, SampleRate(44_100), 2, &INPUT_FORMATS);
+        assert_eq!(picked.len(), 2);
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::F32);
+        assert!(picked
+            .iter()
+            .all(|cfg| cfg.config.sample_rate() == SampleRate(44_100)));
+
+        assert!(pick_at_rate(&ranges, SampleRate(192_000), 2, &INPUT_FORMATS).is_empty());
     }
 }
