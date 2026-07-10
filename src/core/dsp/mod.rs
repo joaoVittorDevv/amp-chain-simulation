@@ -1,5 +1,6 @@
 pub mod analyzer;
 pub mod limiter;
+pub mod rt_resampler;
 pub mod sample_convert;
 pub mod standalone_pipeline;
 
