@@ -724,32 +724,42 @@ fn audio_worker(
                     }
                 };
 
-                let sample_rate_warning = input_configs
-                    .first()
-                    .zip(output_configs.first())
-                    .and_then(|(input_config, output_config)| {
-                        let (_, needs_resampling) =
-                            reconcile_sample_rate(input_config, output_config);
-                        needs_resampling.then(|| {
-                            format!(
-                                "⚠️ resampling ativo: {} → {} Hz",
-                                input_config.config.sample_rate().0,
-                                output_config.config.sample_rate().0
-                            )
-                        })
-                    });
+                let (effective_rate, sample_rate_warning) =
+                    match input_configs.first().zip(output_configs.first()) {
+                        Some((input_config, output_config)) => {
+                            let (effective_rate, needs_resampling) =
+                                reconcile_sample_rate(input_config, output_config);
+                            let warning = needs_resampling.then(|| {
+                                format!(
+                                    "⚠️ resampling ativo: {} → {} Hz",
+                                    input_config.config.sample_rate().0,
+                                    output_config.config.sample_rate().0
+                                )
+                            });
+                            (effective_rate, warning)
+                        }
+                        None => {
+                            let effective_rate = input_configs
+                                .first()
+                                .or_else(|| output_configs.first())
+                                .map(|cfg| cfg.config.sample_rate().0)
+                                .unwrap_or(48_000);
+                            (effective_rate, None)
+                        }
+                    };
 
-                // `max_block` is read off the config we are about to open, so it can
-                // only be computed once negotiation has settled.
-                let max_block: usize = input_configs
-                    .first()
-                    .or_else(|| output_configs.first())
+                // Size the shared ring for the largest negotiated retry candidate.
+                // Input DSP scratch space is sized from the concrete config attempted below.
+                let ring_buffer_max_block: usize = input_configs
+                    .iter()
+                    .chain(output_configs.iter())
                     .map(|cfg| cfg.max_block)
+                    .max()
                     .unwrap_or(FALLBACK_MAX_BLOCK)
                     .max(buffer_size as usize);
 
                 let (pt_producer, pt_consumer) = if has_both {
-                    let (p, c) = RingBuffer::new((max_block * 8).max(2048));
+                    let (p, c) = RingBuffer::new((ring_buffer_max_block * 8).max(2048));
                     // Wrap in Arc<Mutex<>> so they can be cloned for each config attempt
                     (Some(Arc::new(Mutex::new(p))), Some(Arc::new(Mutex::new(c))))
                 } else {
@@ -773,6 +783,7 @@ fn audio_worker(
                         let channels = strict_config.channels;
                         let l_idx = left.min((channels.saturating_sub(1)) as usize);
                         let r_idx = right.min((channels.saturating_sub(1)) as usize);
+                        let max_block = picked_config.max_block.max(buffer_size as usize);
 
                         // Clone Arc-wrapped values for this config attempt
                         let state_for_callback = state_clone.clone();
@@ -786,8 +797,8 @@ fn audio_worker(
                         // pipeline e os buffers de scratch são construídos uma única
                         // vez e movidos para dentro de qual braço for de fato
                         // utilizado.
-                        let s_rate = strict_config.sample_rate.0 as f32;
-                        cabinet_sr.store(strict_config.sample_rate.0, Ordering::Relaxed);
+                        let s_rate = effective_rate as f32;
+                        cabinet_sr.store(effective_rate, Ordering::Relaxed);
                         cabinet_max_block.store(max_block, Ordering::Relaxed);
 
                         // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
@@ -1011,8 +1022,6 @@ fn audio_worker(
                         let channels = strict_config.channels;
                         let l_idx = left.min((channels.saturating_sub(1)) as usize);
                         let r_idx = right.min((channels.saturating_sub(1)) as usize);
-                        cabinet_sr.store(strict_config.sample_rate.0, Ordering::Relaxed);
-                        cabinet_max_block.store(max_block, Ordering::Relaxed);
 
                         // Clone Arc-wrapped values for this config attempt
                         let pt_for_callback = pt_consumer.clone();
