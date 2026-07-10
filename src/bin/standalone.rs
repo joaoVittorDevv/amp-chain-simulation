@@ -1,7 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use distortion::core::audio_config::{
-    pick_config, pick_full_duplex, PickedConfig, StreamDirection, FALLBACK_MAX_BLOCK,
+    pick_config, pick_full_duplex, reconcile_sample_rate, PickedConfig, StreamDirection,
+    FALLBACK_MAX_BLOCK,
 };
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::device_context::{DeviceContext, Direction};
@@ -553,17 +554,6 @@ fn asio_duplex_device(
 /// we will not open them.
 type NegotiatedConfigs = Result<(Vec<PickedConfig>, Vec<PickedConfig>), String>;
 
-fn reconcile_sample_rate(input: &PickedConfig, output: &PickedConfig) -> (u32, bool) {
-    let input_sample_rate = input.config.sample_rate().0;
-    let output_sample_rate = output.config.sample_rate().0;
-
-    if input_sample_rate == output_sample_rate {
-        (input_sample_rate, false)
-    } else {
-        (output_sample_rate, true)
-    }
-}
-
 fn audio_worker(
     rx_cmd: Receiver<AudioCommand>,
     tx_event: Sender<AudioEvent>,
@@ -734,35 +724,20 @@ fn audio_worker(
                     }
                 };
 
-                let sample_rate_reconciliation = input_configs
+                let sample_rate_warning = input_configs
                     .first()
                     .zip(output_configs.first())
-                    .map(|(input_config, output_config)| {
-                        let (effective_sample_rate, needs_resampling) =
+                    .and_then(|(input_config, output_config)| {
+                        let (_, needs_resampling) =
                             reconcile_sample_rate(input_config, output_config);
-                        let warning = needs_resampling.then(|| {
+                        needs_resampling.then(|| {
                             format!(
                                 "⚠️ resampling ativo: {} → {} Hz",
                                 input_config.config.sample_rate().0,
                                 output_config.config.sample_rate().0
                             )
-                        });
-                        (effective_sample_rate, warning)
+                        })
                     });
-
-                let effective_sample_rate = sample_rate_reconciliation
-                    .as_ref()
-                    .map(|(sample_rate, _)| *sample_rate)
-                    .or_else(|| {
-                        input_configs
-                            .first()
-                            .or_else(|| output_configs.first())
-                            .map(|cfg| cfg.config.sample_rate().0)
-                    })
-                    .unwrap_or(48_000);
-                let sample_rate_warning =
-                    sample_rate_reconciliation.and_then(|(_, warning)| warning);
-                let effective_s_rate = effective_sample_rate as f32;
 
                 // `max_block` is read off the config we are about to open, so it can
                 // only be computed once negotiation has settled.
@@ -784,8 +759,6 @@ fn audio_worker(
                 let state_clone = standalone_state.clone();
                 // Wrap analyzer_producer in Arc<Mutex<>> so it can be cloned for each config attempt
                 let analyzer_producer = Arc::new(Mutex::new(analyzer_producer));
-                cabinet_sr.store(effective_sample_rate, Ordering::Relaxed);
-                cabinet_max_block.store(max_block, Ordering::Relaxed);
 
                 if let (Some(DeviceSelection { left, right, .. }), Some(device)) =
                     (input.as_ref(), input_device.as_ref())
@@ -813,7 +786,9 @@ fn audio_worker(
                         // pipeline e os buffers de scratch são construídos uma única
                         // vez e movidos para dentro de qual braço for de fato
                         // utilizado.
-                        let s_rate = effective_s_rate;
+                        let s_rate = strict_config.sample_rate.0 as f32;
+                        cabinet_sr.store(strict_config.sample_rate.0, Ordering::Relaxed);
+                        cabinet_max_block.store(max_block, Ordering::Relaxed);
 
                         // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
                         {
@@ -1036,6 +1011,8 @@ fn audio_worker(
                         let channels = strict_config.channels;
                         let l_idx = left.min((channels.saturating_sub(1)) as usize);
                         let r_idx = right.min((channels.saturating_sub(1)) as usize);
+                        cabinet_sr.store(strict_config.sample_rate.0, Ordering::Relaxed);
+                        cabinet_max_block.store(max_block, Ordering::Relaxed);
 
                         // Clone Arc-wrapped values for this config attempt
                         let pt_for_callback = pt_consumer.clone();
@@ -3112,45 +3089,6 @@ impl eframe::App for StandaloneApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         let _ = self.tx_cmd.send(AudioCommand::Stop);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cpal::{SampleFormat, SampleRate, SupportedBufferSize, SupportedStreamConfigRange};
-
-    fn picked_config(sample_rate: u32) -> PickedConfig {
-        let range = SupportedStreamConfigRange::new(
-            2,
-            SampleRate(sample_rate),
-            SampleRate(sample_rate),
-            SupportedBufferSize::Range { min: 64, max: 512 },
-            SampleFormat::F32,
-        );
-
-        PickedConfig {
-            config: range
-                .try_with_sample_rate(SampleRate(sample_rate))
-                .expect("fixed range should support its sample rate"),
-            max_block: 512,
-        }
-    }
-
-    #[test]
-    fn reconcile_sample_rate_uses_common_rate_without_resampling() {
-        let input = picked_config(48_000);
-        let output = picked_config(48_000);
-
-        assert_eq!(reconcile_sample_rate(&input, &output), (48_000, false));
-    }
-
-    #[test]
-    fn reconcile_sample_rate_uses_output_rate_when_resampling_is_needed() {
-        let input = picked_config(44_100);
-        let output = picked_config(48_000);
-
-        assert_eq!(reconcile_sample_rate(&input, &output), (48_000, true));
     }
 }
 
