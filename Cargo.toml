@@ -63,7 +63,7 @@ lab = ["dep:sha2", "dep:semver", "dep:chrono", "dep:uuid", "dep:flate2", "dep:ta
 # not this crate's, and Cargo features aren't visible across the dependency
 # boundary without an explicit forwarding feature like this one.
 nih-plug-assert = ["nih_plug/assert_process_allocs"]
-# Must stay out of `default`: enabling this makes the ASIO SDK (`ASIO_DIR`) and
+# Must stay out of `default`: enabling this makes the ASIO SDK (`CPAL_ASIO_DIR`) and
 # `LIBCLANG_PATH` hard build requirements, which CI does not have. cpal declares
 # `asio-sys` only under `cfg(target_os = "windows")`, so this is inert elsewhere.
 asio = ["cpal/asio"]

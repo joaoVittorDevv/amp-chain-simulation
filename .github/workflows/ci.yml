@@ -80,7 +80,7 @@ jobs:
       matrix:
         os: [windows-latest]
     env:
-      ASIO_DIR: ${{ github.workspace }}\asio-sdk
+      CPAL_ASIO_DIR: ${{ github.workspace }}\asio-sdk
       LIBCLANG_PATH: C:\Program Files\LLVM\bin
 
     steps:
@@ -93,7 +93,7 @@ jobs:
       - name: Restore cached ASIO SDK
         uses: actions/cache@v4
         with:
-          path: ${{ env.ASIO_DIR }}
+          path: ${{ env.CPAL_ASIO_DIR }}
           key: asio-sdk-${{ runner.os }}
 
       - name: Build and test with ASIO
