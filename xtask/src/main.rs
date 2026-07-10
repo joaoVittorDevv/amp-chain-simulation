@@ -12,6 +12,7 @@ enum Verb {
     Build,
     Run,
     Clean,
+    Bundle,
     /// Unknown verb: delegate to nih_plug_xtask::main_with_args.
     Delegate,
 }
@@ -23,6 +24,7 @@ fn parse_verb(arg: &str) -> Verb {
         "build" => Verb::Build,
         "run" => Verb::Run,
         "clean" => Verb::Clean,
+        "bundle" => Verb::Bundle,
         _ => Verb::Delegate,
     }
 }
@@ -64,8 +66,12 @@ fn main() -> nih_plug_xtask::Result<()> {
             cmd_clean();
             Ok(())
         }
+        Verb::Bundle => {
+            std::env::set_var("DISTORTION_FORCE_RUST_NEURAL", "1");
+            nih_plug_xtask::main_with_args("cargo xtask", args)
+        }
         Verb::Delegate => {
-            // Includes `bundle`, `bundle-universal`, and any unknown verb.
+            // Includes `bundle-universal` and any unknown verb.
             nih_plug_xtask::main_with_args("cargo xtask", args)
         }
     }
@@ -278,11 +284,11 @@ mod tests {
         assert_eq!(parse_verb("build"), Verb::Build);
         assert_eq!(parse_verb("run"), Verb::Run);
         assert_eq!(parse_verb("clean"), Verb::Clean);
+        assert_eq!(parse_verb("bundle"), Verb::Bundle);
     }
 
     #[test]
     fn verb_parser_delegates_unknown() {
-        assert_eq!(parse_verb("bundle"), Verb::Delegate);
         assert_eq!(parse_verb("bundle-universal"), Verb::Delegate);
         assert_eq!(parse_verb("list-plugins"), Verb::Delegate);
         assert_eq!(parse_verb(""), Verb::Delegate);
