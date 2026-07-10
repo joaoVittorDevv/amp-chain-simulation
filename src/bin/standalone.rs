@@ -1,8 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use distortion::core::audio_config::{
-    pick_config, pick_full_duplex, reconcile_sample_rate, PickedConfig, StreamDirection,
-    FALLBACK_MAX_BLOCK,
+    format_latency, pick_config, pick_full_duplex, reconcile_sample_rate, PickedConfig,
+    StreamDirection, FALLBACK_MAX_BLOCK,
 };
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::device_context::{DeviceContext, Direction};
@@ -23,7 +23,7 @@ use distortion::lab::Lab;
 use eframe::egui;
 use nih_plug::prelude::Enum;
 use rtrb::{Consumer, RingBuffer};
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -385,6 +385,9 @@ struct StandaloneApp {
     buffer_range_min: u32,
     buffer_range_max: u32,
 
+    driver_buffer_frames: Arc<AtomicU64>,
+    driver_buffer_rate: Arc<AtomicU64>,
+
     sample_rate_warning: Option<String>,
     last_audio_error: Option<String>,
     last_audio_error_details: Option<String>,
@@ -563,6 +566,8 @@ fn audio_worker(
     cabinet_library: Arc<Mutex<CabinetLibrary>>,
     cabinet_sr: Arc<AtomicU32>,
     cabinet_max_block: Arc<AtomicUsize>,
+    driver_buffer_frames: Arc<AtomicU64>,
+    driver_buffer_rate: Arc<AtomicU64>,
 ) {
     let mut _input_stream: Option<Stream> = None;
     let mut _output_stream: Option<Stream> = None;
@@ -774,12 +779,19 @@ fn audio_worker(
                         let channels = strict_config.channels;
                         let l_idx = left.min((channels.saturating_sub(1)) as usize);
                         let r_idx = right.min((channels.saturating_sub(1)) as usize);
-                        let max_block = picked_config.max_block.max(buffer_size as usize);
+                        // The slider no longer inflates the DSP block: the driver
+                        // picks the real callback size (`BufferSize::Default`), so
+                        // scratch space comes from the negotiated config alone.
+                        // Blocks larger than this are chunked by
+                        // `process_interleaved_block`, so a short buffer is safe.
+                        let max_block = picked_config.max_block;
 
                         // Clone Arc-wrapped values for this config attempt
                         let state_for_callback = state_clone.clone();
                         let analyzer_for_callback = analyzer_producer.clone();
                         let pt_for_callback = pt_producer.clone();
+                        let frames_for_callback = driver_buffer_frames.clone();
+                        let rate_for_callback = driver_buffer_rate.clone();
 
                         // INICIALIZAÇÃO DSP: Fora do loop de processamento! Comum aos
                         // três formatos nativos suportados (F32/I32/I16, T15) — cada
@@ -840,6 +852,11 @@ fn audio_worker(
                             cpal::SampleFormat::F32 => device.build_input_stream(
                                 &strict_config,
                                 move |data: &[f32], _: &_| {
+                                    frames_for_callback.store(
+                                        (data.len() / channels_usize.max(1)) as u64,
+                                        Ordering::Relaxed,
+                                    );
+                                    rate_for_callback.store(cfg_rate as u64, Ordering::Relaxed);
                                     let snap = state_for_callback
                                         .try_lock()
                                         .map(|g| g.audio())
@@ -878,9 +895,16 @@ fn audio_worker(
                                 let state_for_i32 = state_for_callback.clone();
                                 let analyzer_for_i32 = analyzer_for_callback.clone();
                                 let pt_for_i32 = pt_for_callback.clone();
+                                let frames_for_i32 = frames_for_callback.clone();
+                                let rate_for_i32 = rate_for_callback.clone();
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i32], _: &_| {
+                                        frames_for_i32.store(
+                                            (data.len() / channels_usize.max(1)) as u64,
+                                            Ordering::Relaxed,
+                                        );
+                                        rate_for_i32.store(cfg_rate as u64, Ordering::Relaxed);
                                         let snap = state_for_i32
                                             .try_lock()
                                             .map(|g| g.audio())
@@ -920,9 +944,16 @@ fn audio_worker(
                                 let state_for_i16 = state_for_callback.clone();
                                 let analyzer_for_i16 = analyzer_for_callback.clone();
                                 let pt_for_i16 = pt_for_callback.clone();
+                                let frames_for_i16 = frames_for_callback.clone();
+                                let rate_for_i16 = rate_for_callback.clone();
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i16], _: &_| {
+                                        frames_for_i16.store(
+                                            (data.len() / channels_usize.max(1)) as u64,
+                                            Ordering::Relaxed,
+                                        );
+                                        rate_for_i16.store(cfg_rate as u64, Ordering::Relaxed);
                                         let snap = state_for_i16
                                             .try_lock()
                                             .map(|g| g.audio())
@@ -1184,12 +1215,17 @@ impl StandaloneApp {
 
         let standalone_state = Arc::new(Mutex::new(initial_state));
 
+        let driver_buffer_frames = Arc::new(AtomicU64::new(0));
+        let driver_buffer_rate = Arc::new(AtomicU64::new(0));
+
         let cons_clone = cons_arc.clone();
         let state_clone = standalone_state.clone();
         let mailbox_clone = cabinet_mailbox.clone();
         let library_clone = cabinet_library.clone();
         let sr_clone = cabinet_sr.clone();
         let maxb_clone = cabinet_max_block.clone();
+        let frames_clone = driver_buffer_frames.clone();
+        let rate_clone = driver_buffer_rate.clone();
         thread::spawn(move || {
             audio_worker(
                 rx_worker,
@@ -1200,6 +1236,8 @@ impl StandaloneApp {
                 library_clone,
                 sr_clone,
                 maxb_clone,
+                frames_clone,
+                rate_clone,
             );
         });
 
@@ -1222,6 +1260,9 @@ impl StandaloneApp {
             buffer_power: 11,     // 2048 frames default
             buffer_range_min: 5,  // 32 minimum starting
             buffer_range_max: 13, // 8192 max starting
+
+            driver_buffer_frames,
+            driver_buffer_rate,
 
             sample_rate_warning: None,
             last_audio_error: None,
@@ -1610,8 +1651,17 @@ impl eframe::App for StandaloneApp {
 
                         ui.separator();
 
-                        ui.heading("⏱️ Latência Física (Buffer Size)");
+                        ui.heading("⏱️ Ring buffer slack");
                         ui.add_space(2.0);
+
+                        // Real latency comes from the block the driver actually
+                        // hands us, not from the slider above.
+                        let frames = self.driver_buffer_frames.load(Ordering::Relaxed) as usize;
+                        let rate = self.driver_buffer_rate.load(Ordering::Relaxed) as u32;
+                        if frames > 0 && rate > 0 {
+                            ui.label(format_latency(frames, rate));
+                            ui.add_space(2.0);
+                        }
 
                         let mut slider_changed = false;
                         ui.horizontal(|ui| {
@@ -1638,9 +1688,9 @@ impl eframe::App for StandaloneApp {
 
                         let buf_size = 1 << self.buffer_power;
                         let caption = match buf_size {
-                            0..=128 => "Guitarras / Baterias. Baixíssima latência.\n⚠️ Risco EXTREMO de estalos/breaks.",
-                            129..=512 => "Produção e Gravação Dinâmica.\n✅ Relação Equilibrada.",
-                            _ => "Mixagem e Masterização Isolada.\n🔥 Estabilidade máxima. Latência alta.",
+                            0..=128 => "Folga mínima no ring de playthrough.\n⚠️ Risco EXTREMO de estalos/breaks.",
+                            129..=512 => "Folga equilibrada.\n✅ Recomendado para a maioria dos drivers.",
+                            _ => "Folga ampla.\n🔥 Estabilidade máxima. Mais uso de memória.",
                         };
 
                         ui.add_space(5.0);
