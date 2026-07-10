@@ -724,29 +724,20 @@ fn audio_worker(
                     }
                 };
 
-                let (effective_rate, sample_rate_warning) =
-                    match input_configs.first().zip(output_configs.first()) {
-                        Some((input_config, output_config)) => {
-                            let (effective_rate, needs_resampling) =
-                                reconcile_sample_rate(input_config, output_config);
-                            let warning = needs_resampling.then(|| {
-                                format!(
-                                    "⚠️ resampling ativo: {} → {} Hz",
-                                    input_config.config.sample_rate().0,
-                                    output_config.config.sample_rate().0
-                                )
-                            });
-                            (effective_rate, warning)
-                        }
-                        None => {
-                            let effective_rate = input_configs
-                                .first()
-                                .or_else(|| output_configs.first())
-                                .map(|cfg| cfg.config.sample_rate().0)
-                                .unwrap_or(48_000);
-                            (effective_rate, None)
-                        }
-                    };
+                let sample_rate_warning = match input_configs.first().zip(output_configs.first()) {
+                    Some((input_config, output_config)) => {
+                        let (effective_rate, needs_resampling) =
+                            reconcile_sample_rate(input_config, output_config);
+                        needs_resampling.then(|| {
+                            format!(
+                                "⚠️ resampling ativo: {} → {} Hz",
+                                input_config.config.sample_rate().0,
+                                effective_rate
+                            )
+                        })
+                    }
+                    None => None,
+                };
 
                 // Size the shared ring for the largest negotiated retry candidate.
                 // Input DSP scratch space is sized from the concrete config attempted below.
@@ -797,13 +788,13 @@ fn audio_worker(
                         // pipeline e os buffers de scratch são construídos uma única
                         // vez e movidos para dentro de qual braço for de fato
                         // utilizado.
-                        let s_rate = effective_rate as f32;
-                        cabinet_sr.store(effective_rate, Ordering::Relaxed);
-                        cabinet_max_block.store(max_block, Ordering::Relaxed);
+                        let cfg_rate = picked_config.config.sample_rate().0;
+                        let s_rate = cfg_rate as f32;
 
                         // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
-                        {
-                            // Resolver o IR ativo e publicar um runtime para este sample rate.
+                        let cabinet_runtime = {
+                            // Resolver o IR ativo e preparar um runtime para este sample rate.
+                            let mut runtime = None;
                             let mut hash = state_clone
                                 .lock()
                                 .ok()
@@ -822,12 +813,13 @@ fn audio_worker(
                                         if let Ok(rt) =
                                             CabinetRuntime::build(&bytes, s_rate, max_block)
                                         {
-                                            cabinet_mailbox.publish(rt);
+                                            runtime = Some(rt);
                                         }
                                     }
                                 }
                             }
-                        }
+                            runtime
+                        };
 
                         // Pré-EQ (tone-stack) — IR fixo embedado no binário (sem path absoluto).
                         let pre_eq_ir = decode_wav_flat(DEFAULT_PRE_EQ_IR).unwrap_or_default();
@@ -982,6 +974,11 @@ fn audio_worker(
                                     );
                                     continue;
                                 } else {
+                                    cabinet_sr.store(cfg_rate, Ordering::Relaxed);
+                                    cabinet_max_block.store(max_block, Ordering::Relaxed);
+                                    if let Some(rt) = cabinet_runtime {
+                                        cabinet_mailbox.publish(rt);
+                                    }
                                     _input_stream = Some(str);
                                     input_built = true;
                                     break; // Success!
