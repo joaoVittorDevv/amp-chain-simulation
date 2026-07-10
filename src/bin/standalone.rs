@@ -572,6 +572,72 @@ fn stream_error_kind(err: cpal::StreamError) -> ErrorKind {
 
 /// Shared handle to a ring producer written from an audio callback.
 type SharedProducer = Arc<Mutex<Producer<f32>>>;
+/// Shared handle to the playthrough consumer drained by the output callback.
+type SharedConsumer = Arc<Mutex<Consumer<f32>>>;
+
+/// Lock-free handoff of ring-fill measurements from the output callback to the
+/// input callback that owns the resampler.
+struct DriftObservation {
+    fill_ratio_bits: AtomicU64,
+    sequence: AtomicU64,
+}
+
+impl DriftObservation {
+    fn new() -> Self {
+        Self {
+            fill_ratio_bits: AtomicU64::new(0.5f64.to_bits()),
+            sequence: AtomicU64::new(0),
+        }
+    }
+
+    fn publish(&self, fill_ratio: f64) {
+        self.fill_ratio_bits
+            .store(fill_ratio.to_bits(), Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn apply_to(&self, resampler: &mut Option<RtResampler>, last_sequence: &mut u64) {
+        let sequence = self.sequence.load(Ordering::Acquire);
+        if sequence == *last_sequence {
+            return;
+        }
+
+        let fill_ratio = f64::from_bits(self.fill_ratio_bits.load(Ordering::Relaxed));
+        if let Some(resampler) = resampler {
+            resampler.trim_ratio(fill_ratio);
+        }
+        *last_sequence = sequence;
+    }
+}
+
+/// Publish a ring-fill measurement after approximately one second of output.
+fn observe_playthrough_fill(
+    consumer: &Option<SharedConsumer>,
+    total_capacity: usize,
+    frames_processed: usize,
+    sample_rate: u32,
+    frames_since_observation: &mut usize,
+    observation: &DriftObservation,
+) {
+    *frames_since_observation += frames_processed;
+    if *frames_since_observation < sample_rate as usize {
+        return;
+    }
+    *frames_since_observation %= sample_rate as usize;
+
+    if total_capacity == 0 {
+        return;
+    }
+    if let Some(consumer) = consumer {
+        if let Ok(consumer) = consumer.try_lock() {
+            let filled_slots = consumer.slots();
+            let available_write_slots = total_capacity.saturating_sub(filled_slots);
+            let fill_ratio =
+                (total_capacity - available_write_slots) as f64 / total_capacity as f64;
+            observation.publish(fill_ratio);
+        }
+    }
+}
 
 /// Publishes one block of processed frames: the mono mix to the analyzer ring,
 /// and — when playthrough is active — interleaved L/R to the output ring.
@@ -842,7 +908,7 @@ fn audio_worker(
                     .unwrap_or(FALLBACK_MAX_BLOCK)
                     .max(buffer_size as usize);
 
-                let (pt_producer, pt_consumer) = if has_both {
+                let playthrough_capacity = if has_both {
                     // Two samples per frame, four blocks of slack — scaled by the
                     // ratio because the resampler pushes output-rate frames.
                     let ring_frames =
@@ -853,12 +919,18 @@ fn audio_worker(
                     let burst_frames =
                         (RtResampler::CHUNK_FRAMES as f64 * max_resample_ratio).ceil() as usize;
                     let floor_samples = (burst_frames * 4 * 2).max(2048);
-                    let (p, c) = RingBuffer::new((ring_frames * 8).max(floor_samples));
+                    (ring_frames * 8).max(floor_samples)
+                } else {
+                    0
+                };
+                let (pt_producer, pt_consumer) = if has_both {
+                    let (p, c) = RingBuffer::new(playthrough_capacity);
                     // Wrap in Arc<Mutex<>> so they can be cloned for each config attempt
                     (Some(Arc::new(Mutex::new(p))), Some(Arc::new(Mutex::new(c))))
                 } else {
                     (None, None)
                 };
+                let drift_observation = Arc::new(DriftObservation::new());
 
                 let state_clone = standalone_state.clone();
                 // Wrap analyzer_producer in Arc<Mutex<>> so it can be cloned for each config attempt
@@ -890,6 +962,7 @@ fn audio_worker(
                         let pt_for_callback = pt_producer.clone();
                         let frames_for_callback = driver_buffer_frames.clone();
                         let rate_for_callback = driver_buffer_rate.clone();
+                        let drift_for_callback = drift_observation.clone();
 
                         // INICIALIZAÇÃO DSP: Fora do loop de processamento! Comum aos
                         // três formatos nativos suportados (F32/I32/I16, T15) — cada
@@ -960,6 +1033,7 @@ fn audio_worker(
                         let stream_res = match config.sample_format() {
                             cpal::SampleFormat::F32 => {
                                 let status_err = audio_status.clone();
+                                let mut last_drift_sequence = 0;
                                 device.build_input_stream(
                                 &strict_config,
                                 move |data: &[f32], _: &_| {
@@ -992,6 +1066,10 @@ fn audio_worker(
                                             )
                                         },
                                     );
+                                    drift_for_callback.apply_to(
+                                        &mut resampler,
+                                        &mut last_drift_sequence,
+                                    );
                                 },
                                 move |err| status_err.set_error(stream_error_kind(err)),
                                 None,
@@ -1004,6 +1082,8 @@ fn audio_worker(
                                 let pt_for_i32 = pt_for_callback.clone();
                                 let frames_for_i32 = frames_for_callback.clone();
                                 let rate_for_i32 = rate_for_callback.clone();
+                                let drift_for_i32 = drift_for_callback.clone();
+                                let mut last_drift_sequence = 0;
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i32], _: &_| {
@@ -1036,6 +1116,10 @@ fn audio_worker(
                                                 )
                                             },
                                         );
+                                        drift_for_i32.apply_to(
+                                            &mut resampler,
+                                            &mut last_drift_sequence,
+                                        );
                                     },
                                     move |err| status_err.set_error(stream_error_kind(err)),
                                     None,
@@ -1048,6 +1132,8 @@ fn audio_worker(
                                 let pt_for_i16 = pt_for_callback.clone();
                                 let frames_for_i16 = frames_for_callback.clone();
                                 let rate_for_i16 = rate_for_callback.clone();
+                                let drift_for_i16 = drift_for_callback.clone();
+                                let mut last_drift_sequence = 0;
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i16], _: &_| {
@@ -1079,6 +1165,10 @@ fn audio_worker(
                                                     out_r,
                                                 )
                                             },
+                                        );
+                                        drift_for_i16.apply_to(
+                                            &mut resampler,
+                                            &mut last_drift_sequence,
                                         );
                                     },
                                     move |err| status_err.set_error(stream_error_kind(err)),
@@ -1149,10 +1239,13 @@ fn audio_worker(
 
                         // Clone Arc-wrapped values for this config attempt
                         let pt_for_callback = pt_consumer.clone();
+                        let drift_for_callback = drift_observation.clone();
+                        let output_rate = strict_config.sample_rate.0;
 
                         let stream_res = match config.sample_format() {
                             cpal::SampleFormat::F32 => {
                                 let status_err = audio_status.clone();
+                                let mut frames_since_observation = 0;
                                 device.build_output_stream(
                                 &strict_config,
                                 move |data: &mut [f32], _: &_| {
@@ -1174,6 +1267,14 @@ fn audio_worker(
                                             *r = r_sample;
                                         }
                                     }
+                                    observe_playthrough_fill(
+                                        &pt_for_callback,
+                                        playthrough_capacity,
+                                        data.len() / channels as usize,
+                                        output_rate,
+                                        &mut frames_since_observation,
+                                        &drift_for_callback,
+                                    );
                                 },
                                 move |err| status_err.set_error(stream_error_kind(err)),
                                 None,
@@ -1182,6 +1283,8 @@ fn audio_worker(
                             cpal::SampleFormat::I16 => {
                                 let status_err = audio_status.clone();
                                 let pt_for_i16 = pt_for_callback.clone();
+                                let drift_for_i16 = drift_for_callback.clone();
+                                let mut frames_since_observation = 0;
                                 device.build_output_stream(
                                     &strict_config,
                                     move |data: &mut [i16], _: &_| {
@@ -1204,6 +1307,14 @@ fn audio_worker(
                                                 *r = (r_sample * i16::MAX as f32) as i16;
                                             }
                                         }
+                                        observe_playthrough_fill(
+                                            &pt_for_i16,
+                                            playthrough_capacity,
+                                            data.len() / channels as usize,
+                                            output_rate,
+                                            &mut frames_since_observation,
+                                            &drift_for_i16,
+                                        );
                                     },
                                     move |err| status_err.set_error(stream_error_kind(err)),
                                     None,
