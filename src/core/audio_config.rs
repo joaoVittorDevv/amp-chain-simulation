@@ -57,6 +57,17 @@ pub struct PickedConfig {
     pub max_block: usize,
 }
 
+pub fn reconcile_sample_rate(input: &PickedConfig, output: &PickedConfig) -> (u32, bool) {
+    let input_sample_rate = input.config.sample_rate().0;
+    let output_sample_rate = output.config.sample_rate().0;
+
+    if input_sample_rate == output_sample_rate {
+        (input_sample_rate, false)
+    } else {
+        (output_sample_rate, true)
+    }
+}
+
 /// Largest block a driver-reported buffer range can deliver.
 pub fn max_block_from(buffer_size: &SupportedBufferSize) -> usize {
     match *buffer_size {
@@ -429,6 +440,31 @@ mod tests {
             sr,
             SupportedBufferSize::Range { min: 64, max: 1024 },
         )
+    }
+
+    fn picked_config(sample_rate: u32) -> PickedConfig {
+        PickedConfig {
+            config: fixed(SampleFormat::F32, sample_rate)
+                .try_with_sample_rate(SampleRate(sample_rate))
+                .expect("fixed range should support its sample rate"),
+            max_block: 1024,
+        }
+    }
+
+    #[test]
+    fn reconcile_sample_rate_uses_common_rate_without_resampling() {
+        let input = picked_config(48_000);
+        let output = picked_config(48_000);
+
+        assert_eq!(reconcile_sample_rate(&input, &output), (48_000, false));
+    }
+
+    #[test]
+    fn reconcile_sample_rate_uses_output_rate_when_resampling_is_needed() {
+        let input = picked_config(44_100);
+        let output = picked_config(48_000);
+
+        assert_eq!(reconcile_sample_rate(&input, &output), (48_000, true));
     }
 
     #[test]
