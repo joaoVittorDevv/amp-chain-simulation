@@ -52,13 +52,17 @@ fn main() -> nih_plug_xtask::Result<()> {
         Verb::Build => {
             args.remove(0);
             cmd_pre_build();
-            run_cargo(&["build", "--release"]);
+            // Forward any remaining args (e.g. `--features asio`) to cargo.
+            let mut cargo_args: Vec<&str> = vec!["build", "--release"];
+            cargo_args.extend(args.iter().map(String::as_str));
+            run_cargo(&cargo_args);
             Ok(())
         }
         Verb::Run => {
             args.remove(0);
             cmd_pre_build();
-            cmd_run();
+            // Forward any remaining args (e.g. `--features asio`) to cargo.
+            cmd_run(&args);
             Ok(())
         }
         Verb::Clean => {
@@ -188,7 +192,7 @@ fn compile_mojo_if_needed() {
 
 // ── run ──────────────────────────────────────────────────────────────────────
 
-fn cmd_run() {
+fn cmd_run(extra: &[String]) {
     let neural_dir = std::fs::canonicalize("neural")
         .unwrap_or_else(|_| PathBuf::from("neural"))
         .to_string_lossy()
@@ -196,6 +200,7 @@ fn cmd_run() {
 
     let mut cmd = Command::new("cargo");
     cmd.args(["run", "--release", "--bin", "standalone"]);
+    cmd.args(extra);
 
     #[cfg(target_os = "linux")]
     {
