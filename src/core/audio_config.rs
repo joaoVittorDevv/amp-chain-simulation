@@ -251,6 +251,12 @@ fn spans(range: &SupportedStreamConfigRange, rate: u32) -> bool {
     min <= max && min <= rate && rate <= max
 }
 
+/// Format driver buffer size + sample rate as a human-readable latency string.
+pub fn format_latency(samples: usize, sample_rate: u32) -> String {
+    let ms = samples as f64 * 1000.0 / sample_rate as f64;
+    format!("{samples} samples @ {sample_rate} Hz = {ms:.1} ms")
+}
+
 /// The inclusive sample-rate intervals `ranges` offers in a format we can use.
 /// Inverted ranges are dropped, matching `pick_from_ranges`.
 fn rate_intervals(
@@ -742,3 +748,10 @@ mod tests {
         assert!(pick_at_rate(&ranges, SampleRate(192_000), 2, &INPUT_FORMATS).is_empty());
     }
 }
+    #[test]
+    fn format_latency_computes_correctly() {
+        assert_eq!(
+            format_latency(256, 48000),
+            "256 samples @ 48000 Hz = 5.3 ms"
+        );
+    }
