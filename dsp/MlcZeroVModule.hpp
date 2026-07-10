@@ -4240,7 +4240,7 @@ class mlczerov : public dsp {
 		float fZec953[32];
 		float fRec145[32];
 		float fSlow91 = static_cast<float>(fEntry14);
-		float fSlow92 = 2.5f * (1.9f * fSlow91 + 1.0f);
+		float fSlow92 = 2.24f * (1.9f * fSlow91 + 1.0f);
 		float fZec954[32];
 		float fRec13_tmp[36];
 		float* fRec13 = &fRec13_tmp[4];
@@ -9200,30 +9200,6 @@ class mlczerov : public dsp {
 			}
 			/* Recursive loop 412 */
 			/* Pre code */
-			for (int j766 = 0; j766 < 4; j766 = j766 + 1) {
-				fRec439_tmp[j766] = fRec439_perm[j766];
-			}
-			for (int j768 = 0; j768 < 4; j768 = j768 + 1) {
-				fRec440_tmp[j768] = fRec440_perm[j768];
-			}
-			/* Compute code */
-			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1983[i] = fRec444[i] - (fConst29 * fRec439[i - 1] + fRec440[i - 1]);
-				fRec439[i] = fRec439[i - 1] + fConst32 * fZec1983[i];
-				fZec1984[i] = fRec439[i - 1] + fConst31 * fZec1983[i];
-				fRec440[i] = fRec440[i - 1] + fConst33 * fZec1984[i];
-				fZec1985[i] = fConst28 * fZec1984[i];
-				fRec441[i] = fRec440[i - 1] + fZec1985[i];
-			}
-			/* Post code */
-			for (int j767 = 0; j767 < 4; j767 = j767 + 1) {
-				fRec439_perm[j767] = fRec439_tmp[vsize + j767];
-			}
-			for (int j769 = 0; j769 < 4; j769 = j769 + 1) {
-				fRec440_perm[j769] = fRec440_tmp[vsize + j769];
-			}
-			/* Recursive loop 413 */
-			/* Pre code */
 			for (int j742 = 0; j742 < 4; j742 = j742 + 1) {
 				fRec436_tmp[j742] = fRec436_perm[j742];
 			}
@@ -9246,6 +9222,30 @@ class mlczerov : public dsp {
 			}
 			for (int j745 = 0; j745 < 4; j745 = j745 + 1) {
 				fRec437_perm[j745] = fRec437_tmp[vsize + j745];
+			}
+			/* Recursive loop 413 */
+			/* Pre code */
+			for (int j766 = 0; j766 < 4; j766 = j766 + 1) {
+				fRec439_tmp[j766] = fRec439_perm[j766];
+			}
+			for (int j768 = 0; j768 < 4; j768 = j768 + 1) {
+				fRec440_tmp[j768] = fRec440_perm[j768];
+			}
+			/* Compute code */
+			for (int i = 0; i < vsize; i = i + 1) {
+				fZec1983[i] = fRec444[i] - (fConst29 * fRec439[i - 1] + fRec440[i - 1]);
+				fRec439[i] = fRec439[i - 1] + fConst32 * fZec1983[i];
+				fZec1984[i] = fRec439[i - 1] + fConst31 * fZec1983[i];
+				fRec440[i] = fRec440[i - 1] + fConst33 * fZec1984[i];
+				fZec1985[i] = fConst28 * fZec1984[i];
+				fRec441[i] = fRec440[i - 1] + fZec1985[i];
+			}
+			/* Post code */
+			for (int j767 = 0; j767 < 4; j767 = j767 + 1) {
+				fRec439_perm[j767] = fRec439_tmp[vsize + j767];
+			}
+			for (int j769 = 0; j769 < 4; j769 = j769 + 1) {
+				fRec440_perm[j769] = fRec440_tmp[vsize + j769];
 			}
 			/* Vectorizable loop 414 */
 			/* Compute code */
@@ -19912,7 +19912,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1339[i] = 6.25f * mlczerov_faustpower2_f(fZec1338[i]) - (fConst50 * fRec261[i - 1] + fRec262[i - 1]);
+				fZec1339[i] = 5.0176f * mlczerov_faustpower2_f(fZec1338[i]) - (fConst50 * fRec261[i - 1] + fRec262[i - 1]);
 				fRec261[i] = fRec261[i - 1] + fConst54 * fZec1339[i];
 				fZec1340[i] = fRec261[i - 1] + fConst53 * fZec1339[i];
 				fRec262[i] = fRec262[i - 1] + fConst55 * fZec1340[i];
@@ -19941,7 +19941,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec2237[i] = 6.25f * mlczerov_faustpower2_f(fZec2236[i]) - (fConst50 * fRec529[i - 1] + fRec530[i - 1]);
+				fZec2237[i] = 5.0176f * mlczerov_faustpower2_f(fZec2236[i]) - (fConst50 * fRec529[i - 1] + fRec530[i - 1]);
 				fRec529[i] = fRec529[i - 1] + fConst54 * fZec2237[i];
 				fZec2238[i] = fRec529[i - 1] + fConst53 * fZec2237[i];
 				fRec530[i] = fRec530[i - 1] + fConst55 * fZec2238[i];
@@ -20703,7 +20703,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec951[i] = 6.25f * mlczerov_faustpower2_f(fZec950[i]) - (fConst50 * fRec143[i - 1] + fRec144[i - 1]);
+				fZec951[i] = 5.0176f * mlczerov_faustpower2_f(fZec950[i]) - (fConst50 * fRec143[i - 1] + fRec144[i - 1]);
 				fRec143[i] = fRec143[i - 1] + fConst54 * fZec951[i];
 				fZec952[i] = fRec143[i - 1] + fConst53 * fZec951[i];
 				fRec144[i] = fRec144[i - 1] + fConst55 * fZec952[i];
@@ -20732,7 +20732,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1851[i] = 6.25f * mlczerov_faustpower2_f(fZec1850[i]) - (fConst50 * fRec411[i - 1] + fRec412[i - 1]);
+				fZec1851[i] = 5.0176f * mlczerov_faustpower2_f(fZec1850[i]) - (fConst50 * fRec411[i - 1] + fRec412[i - 1]);
 				fRec411[i] = fRec411[i - 1] + fConst54 * fZec1851[i];
 				fZec1852[i] = fRec411[i - 1] + fConst53 * fZec1851[i];
 				fRec412[i] = fRec412[i - 1] + fConst55 * fZec1852[i];
@@ -22065,12 +22065,12 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1447[i] = 0.5f * fRec279[i] * fRec2[i - 1] - (fConst78 * fRec276[i - 1] + fRec277[i - 1]);
-				fRec276[i] = fRec276[i - 1] + fConst81 * fZec1447[i];
-				fZec1448[i] = fRec276[i - 1] + fConst80 * fZec1447[i];
+				fZec1447[i] = 0.5f * fRec279[i] * fRec2[i - 1] + fConst78 * fRec276[i - 1] + fRec277[i - 1];
+				fRec276[i] = fRec276[i - 1] - fConst81 * fZec1447[i];
+				fZec1448[i] = fRec276[i - 1] - fConst80 * fZec1447[i];
 				fRec277[i] = fRec277[i - 1] + fConst82 * fZec1448[i];
-				fZec1449[i] = fConst77 * fZec1448[i];
-				fRec278[i] = fRec277[i - 1] + fZec1449[i];
+				fZec1449[i] = fRec277[i - 1] + fConst77 * fZec1448[i];
+				fRec278[i] = fZec1449[i];
 				fZec1450[i] = fRec278[i] - (fConst84 * fRec271[i - 1] + fRec272[i - 1]);
 				fRec271[i] = fRec271[i - 1] + fConst87 * fZec1450[i];
 				fZec1451[i] = fRec271[i - 1] + fConst86 * fZec1450[i];
@@ -22172,12 +22172,12 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec2343[i] = 0.5f * fRec279[i] * fRec285[i - 1] - (fConst78 * fRec542[i - 1] + fRec543[i - 1]);
-				fRec542[i] = fRec542[i - 1] + fConst81 * fZec2343[i];
-				fZec2344[i] = fRec542[i - 1] + fConst80 * fZec2343[i];
+				fZec2343[i] = 0.5f * fRec279[i] * fRec285[i - 1] + fConst78 * fRec542[i - 1] + fRec543[i - 1];
+				fRec542[i] = fRec542[i - 1] - fConst81 * fZec2343[i];
+				fZec2344[i] = fRec542[i - 1] - fConst80 * fZec2343[i];
 				fRec543[i] = fRec543[i - 1] + fConst82 * fZec2344[i];
-				fZec2345[i] = fConst77 * fZec2344[i];
-				fRec544[i] = fRec543[i - 1] + fZec2345[i];
+				fZec2345[i] = fRec543[i - 1] + fConst77 * fZec2344[i];
+				fRec544[i] = fZec2345[i];
 				fZec2346[i] = fRec544[i] - (fConst84 * fRec537[i - 1] + fRec538[i - 1]);
 				fRec537[i] = fRec537[i - 1] + fConst87 * fZec2346[i];
 				fZec2347[i] = fRec537[i - 1] + fConst86 * fZec2346[i];
@@ -24993,30 +24993,6 @@ class mlczerov : public dsp {
 			}
 			/* Recursive loop 412 */
 			/* Pre code */
-			for (int j766 = 0; j766 < 4; j766 = j766 + 1) {
-				fRec439_tmp[j766] = fRec439_perm[j766];
-			}
-			for (int j768 = 0; j768 < 4; j768 = j768 + 1) {
-				fRec440_tmp[j768] = fRec440_perm[j768];
-			}
-			/* Compute code */
-			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1983[i] = fRec444[i] - (fConst29 * fRec439[i - 1] + fRec440[i - 1]);
-				fRec439[i] = fRec439[i - 1] + fConst32 * fZec1983[i];
-				fZec1984[i] = fRec439[i - 1] + fConst31 * fZec1983[i];
-				fRec440[i] = fRec440[i - 1] + fConst33 * fZec1984[i];
-				fZec1985[i] = fConst28 * fZec1984[i];
-				fRec441[i] = fRec440[i - 1] + fZec1985[i];
-			}
-			/* Post code */
-			for (int j767 = 0; j767 < 4; j767 = j767 + 1) {
-				fRec439_perm[j767] = fRec439_tmp[vsize + j767];
-			}
-			for (int j769 = 0; j769 < 4; j769 = j769 + 1) {
-				fRec440_perm[j769] = fRec440_tmp[vsize + j769];
-			}
-			/* Recursive loop 413 */
-			/* Pre code */
 			for (int j742 = 0; j742 < 4; j742 = j742 + 1) {
 				fRec436_tmp[j742] = fRec436_perm[j742];
 			}
@@ -25039,6 +25015,30 @@ class mlczerov : public dsp {
 			}
 			for (int j745 = 0; j745 < 4; j745 = j745 + 1) {
 				fRec437_perm[j745] = fRec437_tmp[vsize + j745];
+			}
+			/* Recursive loop 413 */
+			/* Pre code */
+			for (int j766 = 0; j766 < 4; j766 = j766 + 1) {
+				fRec439_tmp[j766] = fRec439_perm[j766];
+			}
+			for (int j768 = 0; j768 < 4; j768 = j768 + 1) {
+				fRec440_tmp[j768] = fRec440_perm[j768];
+			}
+			/* Compute code */
+			for (int i = 0; i < vsize; i = i + 1) {
+				fZec1983[i] = fRec444[i] - (fConst29 * fRec439[i - 1] + fRec440[i - 1]);
+				fRec439[i] = fRec439[i - 1] + fConst32 * fZec1983[i];
+				fZec1984[i] = fRec439[i - 1] + fConst31 * fZec1983[i];
+				fRec440[i] = fRec440[i - 1] + fConst33 * fZec1984[i];
+				fZec1985[i] = fConst28 * fZec1984[i];
+				fRec441[i] = fRec440[i - 1] + fZec1985[i];
+			}
+			/* Post code */
+			for (int j767 = 0; j767 < 4; j767 = j767 + 1) {
+				fRec439_perm[j767] = fRec439_tmp[vsize + j767];
+			}
+			for (int j769 = 0; j769 < 4; j769 = j769 + 1) {
+				fRec440_perm[j769] = fRec440_tmp[vsize + j769];
 			}
 			/* Vectorizable loop 414 */
 			/* Compute code */
@@ -35705,7 +35705,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1339[i] = 6.25f * mlczerov_faustpower2_f(fZec1338[i]) - (fConst50 * fRec261[i - 1] + fRec262[i - 1]);
+				fZec1339[i] = 5.0176f * mlczerov_faustpower2_f(fZec1338[i]) - (fConst50 * fRec261[i - 1] + fRec262[i - 1]);
 				fRec261[i] = fRec261[i - 1] + fConst54 * fZec1339[i];
 				fZec1340[i] = fRec261[i - 1] + fConst53 * fZec1339[i];
 				fRec262[i] = fRec262[i - 1] + fConst55 * fZec1340[i];
@@ -35734,7 +35734,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec2237[i] = 6.25f * mlczerov_faustpower2_f(fZec2236[i]) - (fConst50 * fRec529[i - 1] + fRec530[i - 1]);
+				fZec2237[i] = 5.0176f * mlczerov_faustpower2_f(fZec2236[i]) - (fConst50 * fRec529[i - 1] + fRec530[i - 1]);
 				fRec529[i] = fRec529[i - 1] + fConst54 * fZec2237[i];
 				fZec2238[i] = fRec529[i - 1] + fConst53 * fZec2237[i];
 				fRec530[i] = fRec530[i - 1] + fConst55 * fZec2238[i];
@@ -36496,7 +36496,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec951[i] = 6.25f * mlczerov_faustpower2_f(fZec950[i]) - (fConst50 * fRec143[i - 1] + fRec144[i - 1]);
+				fZec951[i] = 5.0176f * mlczerov_faustpower2_f(fZec950[i]) - (fConst50 * fRec143[i - 1] + fRec144[i - 1]);
 				fRec143[i] = fRec143[i - 1] + fConst54 * fZec951[i];
 				fZec952[i] = fRec143[i - 1] + fConst53 * fZec951[i];
 				fRec144[i] = fRec144[i - 1] + fConst55 * fZec952[i];
@@ -36525,7 +36525,7 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1851[i] = 6.25f * mlczerov_faustpower2_f(fZec1850[i]) - (fConst50 * fRec411[i - 1] + fRec412[i - 1]);
+				fZec1851[i] = 5.0176f * mlczerov_faustpower2_f(fZec1850[i]) - (fConst50 * fRec411[i - 1] + fRec412[i - 1]);
 				fRec411[i] = fRec411[i - 1] + fConst54 * fZec1851[i];
 				fZec1852[i] = fRec411[i - 1] + fConst53 * fZec1851[i];
 				fRec412[i] = fRec412[i - 1] + fConst55 * fZec1852[i];
@@ -37858,12 +37858,12 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec1447[i] = 0.5f * fRec279[i] * fRec2[i - 1] - (fConst78 * fRec276[i - 1] + fRec277[i - 1]);
-				fRec276[i] = fRec276[i - 1] + fConst81 * fZec1447[i];
-				fZec1448[i] = fRec276[i - 1] + fConst80 * fZec1447[i];
+				fZec1447[i] = 0.5f * fRec279[i] * fRec2[i - 1] + fConst78 * fRec276[i - 1] + fRec277[i - 1];
+				fRec276[i] = fRec276[i - 1] - fConst81 * fZec1447[i];
+				fZec1448[i] = fRec276[i - 1] - fConst80 * fZec1447[i];
 				fRec277[i] = fRec277[i - 1] + fConst82 * fZec1448[i];
-				fZec1449[i] = fConst77 * fZec1448[i];
-				fRec278[i] = fRec277[i - 1] + fZec1449[i];
+				fZec1449[i] = fRec277[i - 1] + fConst77 * fZec1448[i];
+				fRec278[i] = fZec1449[i];
 				fZec1450[i] = fRec278[i] - (fConst84 * fRec271[i - 1] + fRec272[i - 1]);
 				fRec271[i] = fRec271[i - 1] + fConst87 * fZec1450[i];
 				fZec1451[i] = fRec271[i - 1] + fConst86 * fZec1450[i];
@@ -37965,12 +37965,12 @@ class mlczerov : public dsp {
 			}
 			/* Compute code */
 			for (int i = 0; i < vsize; i = i + 1) {
-				fZec2343[i] = 0.5f * fRec279[i] * fRec285[i - 1] - (fConst78 * fRec542[i - 1] + fRec543[i - 1]);
-				fRec542[i] = fRec542[i - 1] + fConst81 * fZec2343[i];
-				fZec2344[i] = fRec542[i - 1] + fConst80 * fZec2343[i];
+				fZec2343[i] = 0.5f * fRec279[i] * fRec285[i - 1] + fConst78 * fRec542[i - 1] + fRec543[i - 1];
+				fRec542[i] = fRec542[i - 1] - fConst81 * fZec2343[i];
+				fZec2344[i] = fRec542[i - 1] - fConst80 * fZec2343[i];
 				fRec543[i] = fRec543[i - 1] + fConst82 * fZec2344[i];
-				fZec2345[i] = fConst77 * fZec2344[i];
-				fRec544[i] = fRec543[i - 1] + fZec2345[i];
+				fZec2345[i] = fRec543[i - 1] + fConst77 * fZec2344[i];
+				fRec544[i] = fZec2345[i];
 				fZec2346[i] = fRec544[i] - (fConst84 * fRec537[i - 1] + fRec538[i - 1]);
 				fRec537[i] = fRec537[i - 1] + fConst87 * fZec2346[i];
 				fZec2347[i] = fRec537[i - 1] + fConst86 * fZec2346[i];
