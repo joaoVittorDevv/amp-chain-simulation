@@ -4,6 +4,7 @@ use distortion::core::audio_config::{
     format_latency, pick_config, pick_full_duplex, reconcile_sample_rate, PickedConfig,
     StreamDirection, FALLBACK_MAX_BLOCK,
 };
+use distortion::core::audio_status::{AudioStatus, ErrorKind};
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::device_context::{DeviceContext, Direction};
 use distortion::core::device_identity::resolve_device;
@@ -389,6 +390,8 @@ struct StandaloneApp {
     driver_buffer_rate: Arc<AtomicU64>,
 
     sample_rate_warning: Option<String>,
+    /// Lock-free channel for stream errors raised on the audio thread (T23).
+    audio_status: Arc<AudioStatus>,
     last_audio_error: Option<String>,
     last_audio_error_details: Option<String>,
     show_error_popup: bool,
@@ -557,6 +560,15 @@ fn asio_duplex_device(
 /// we will not open them.
 type NegotiatedConfigs = Result<(Vec<PickedConfig>, Vec<PickedConfig>), String>;
 
+/// Maps a live cpal stream error into the lock-free `AudioStatus` taxonomy so the
+/// audio thread can flag it without allocating or blocking (T23).
+fn stream_error_kind(err: cpal::StreamError) -> ErrorKind {
+    match err {
+        cpal::StreamError::DeviceNotAvailable => ErrorKind::DeviceDisconnected,
+        cpal::StreamError::BackendSpecific { .. } => ErrorKind::StreamError,
+    }
+}
+
 fn audio_worker(
     rx_cmd: Receiver<AudioCommand>,
     tx_event: Sender<AudioEvent>,
@@ -568,6 +580,7 @@ fn audio_worker(
     cabinet_max_block: Arc<AtomicUsize>,
     driver_buffer_frames: Arc<AtomicU64>,
     driver_buffer_rate: Arc<AtomicU64>,
+    audio_status: Arc<AudioStatus>,
 ) {
     let mut _input_stream: Option<Stream> = None;
     let mut _output_stream: Option<Stream> = None;
@@ -849,7 +862,9 @@ fn audio_worker(
                         let channels_usize = channels as usize;
 
                         let stream_res = match config.sample_format() {
-                            cpal::SampleFormat::F32 => device.build_input_stream(
+                            cpal::SampleFormat::F32 => {
+                                let status_err = audio_status.clone();
+                                device.build_input_stream(
                                 &strict_config,
                                 move |data: &[f32], _: &_| {
                                     frames_for_callback.store(
@@ -888,10 +903,12 @@ fn audio_worker(
                                         },
                                     );
                                 },
-                                |err| eprintln!("Input error: {:?}", err),
+                                move |err| status_err.set_error(stream_error_kind(err)),
                                 None,
-                            ),
+                            )
+                            }
                             cpal::SampleFormat::I32 => {
+                                let status_err = audio_status.clone();
                                 let state_for_i32 = state_for_callback.clone();
                                 let analyzer_for_i32 = analyzer_for_callback.clone();
                                 let pt_for_i32 = pt_for_callback.clone();
@@ -936,11 +953,12 @@ fn audio_worker(
                                             },
                                         );
                                     },
-                                    |err| eprintln!("Input error: {:?}", err),
+                                    move |err| status_err.set_error(stream_error_kind(err)),
                                     None,
                                 )
                             }
                             cpal::SampleFormat::I16 => {
+                                let status_err = audio_status.clone();
                                 let state_for_i16 = state_for_callback.clone();
                                 let analyzer_for_i16 = analyzer_for_callback.clone();
                                 let pt_for_i16 = pt_for_callback.clone();
@@ -985,7 +1003,7 @@ fn audio_worker(
                                             },
                                         );
                                     },
-                                    |err| eprintln!("Input error: {:?}", err),
+                                    move |err| status_err.set_error(stream_error_kind(err)),
                                     None,
                                 )
                             }
@@ -1055,7 +1073,9 @@ fn audio_worker(
                         let pt_for_callback = pt_consumer.clone();
 
                         let stream_res = match config.sample_format() {
-                            cpal::SampleFormat::F32 => device.build_output_stream(
+                            cpal::SampleFormat::F32 => {
+                                let status_err = audio_status.clone();
+                                device.build_output_stream(
                                 &strict_config,
                                 move |data: &mut [f32], _: &_| {
                                     for frame in data.chunks_mut(channels as usize) {
@@ -1077,10 +1097,12 @@ fn audio_worker(
                                         }
                                     }
                                 },
-                                |err| eprintln!("Output error: {:?}", err),
+                                move |err| status_err.set_error(stream_error_kind(err)),
                                 None,
-                            ),
+                            )
+                            }
                             cpal::SampleFormat::I16 => {
+                                let status_err = audio_status.clone();
                                 let pt_for_i16 = pt_for_callback.clone();
                                 device.build_output_stream(
                                     &strict_config,
@@ -1105,7 +1127,7 @@ fn audio_worker(
                                             }
                                         }
                                     },
-                                    |err| eprintln!("Output error: {:?}", err),
+                                    move |err| status_err.set_error(stream_error_kind(err)),
                                     None,
                                 )
                             }
@@ -1217,6 +1239,7 @@ impl StandaloneApp {
 
         let driver_buffer_frames = Arc::new(AtomicU64::new(0));
         let driver_buffer_rate = Arc::new(AtomicU64::new(0));
+        let audio_status = Arc::new(AudioStatus::new());
 
         let cons_clone = cons_arc.clone();
         let state_clone = standalone_state.clone();
@@ -1226,6 +1249,7 @@ impl StandaloneApp {
         let maxb_clone = cabinet_max_block.clone();
         let frames_clone = driver_buffer_frames.clone();
         let rate_clone = driver_buffer_rate.clone();
+        let status_clone = audio_status.clone();
         thread::spawn(move || {
             audio_worker(
                 rx_worker,
@@ -1238,6 +1262,7 @@ impl StandaloneApp {
                 maxb_clone,
                 frames_clone,
                 rate_clone,
+                status_clone,
             );
         });
 
@@ -1265,6 +1290,7 @@ impl StandaloneApp {
             driver_buffer_rate,
 
             sample_rate_warning: None,
+            audio_status,
             last_audio_error: None,
             last_audio_error_details: None,
             show_error_popup: false,
@@ -1404,6 +1430,35 @@ impl eframe::App for StandaloneApp {
         ctx.request_repaint();
         self.poll_events();
 
+        // Drain lock-free stream errors raised on the audio thread (T23). One
+        // `take_error` per frame is enough: `AudioStatus` coalesces bursts and
+        // tallies the rest in `dropped_errors`.
+        if let Some(kind) = self.audio_status.take_error() {
+            let (msg, details) = match kind {
+                ErrorKind::DeviceDisconnected => (
+                    "⚠️ Dispositivo de áudio desconectado",
+                    "O dispositivo de áudio foi removido ou ficou indisponível durante a \
+                     reprodução. Reconecte-o e clique em 'Atualizar Dispositivos'.",
+                ),
+                ErrorKind::StreamError => (
+                    "⚠️ Erro no stream de áudio",
+                    "O driver de áudio relatou um erro durante a reprodução. Verifique o \
+                     dispositivo ou aumente a latência.",
+                ),
+                ErrorKind::ClockDriftUnrecoverable => (
+                    "⚠️ Deriva de clock irrecuperável",
+                    "A diferença de clock entre entrada e saída não pôde ser compensada.",
+                ),
+                ErrorKind::NoError => ("", ""),
+            };
+            if !msg.is_empty() {
+                self.last_audio_error = Some(msg.to_string());
+                self.last_audio_error_details = Some(details.to_string());
+            }
+        }
+        // Reset the coalesced-error tally each frame so it never grows unbounded.
+        let _ = self.audio_status.take_dropped_errors();
+
         if let Ok(mut cons_lock) = self.consumer.try_lock() {
             if let Some(cons) = cons_lock.as_mut() {
                 self.analyzer.process_consumer(cons);
@@ -1484,6 +1539,16 @@ impl eframe::App for StandaloneApp {
                     }
                 });
             });
+
+            if let Some(err_desc) = self.last_audio_error.clone() {
+                ui.horizontal(|ui| {
+                    let dark_red = egui::Color32::from_rgb(200, 70, 70);
+                    ui.label(egui::RichText::new(&err_desc).color(dark_red).strong());
+                    if ui.button("❓ Detalhes").clicked() {
+                        self.show_error_popup = true;
+                    }
+                });
+            }
         });
 
         if self.show_settings {
@@ -1505,6 +1570,14 @@ impl eframe::App for StandaloneApp {
                                     }
                                 });
                             if host_changed { self.refresh_devices(); }
+                            // Manual re-enumeration for when a device is (re)connected
+                            // while the app is running (T23).
+                            if ui.button("🔄 Atualizar Dispositivos").clicked() {
+                                let _ = self
+                                    .tx_cmd
+                                    .send(AudioCommand::RefreshDevices(self.selected_host));
+                                self.is_loading = true;
+                            }
                         });
 
                         ui.separator();
