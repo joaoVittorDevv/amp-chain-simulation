@@ -357,7 +357,10 @@ enum AudioEvent {
         inputs: Vec<DeviceContext>,
         outputs: Vec<DeviceContext>,
     },
-    StreamStarted(Result<(), String>),
+    StreamStarted {
+        result: Result<(), String>,
+        sample_rate_warning: Option<String>,
+    },
 }
 
 struct StandaloneApp {
@@ -547,9 +550,19 @@ fn asio_duplex_device(
 }
 
 /// Configs for the streams we are about to open, or the message explaining why
-/// we will not open them. Input and output are negotiated together so that a
-/// full-duplex pair can never end up on disagreeing sample rates.
+/// we will not open them.
 type NegotiatedConfigs = Result<(Vec<PickedConfig>, Vec<PickedConfig>), String>;
+
+fn reconcile_sample_rate(input: &PickedConfig, output: &PickedConfig) -> (u32, bool) {
+    let input_sample_rate = input.config.sample_rate().0;
+    let output_sample_rate = output.config.sample_rate().0;
+
+    if input_sample_rate == output_sample_rate {
+        (input_sample_rate, false)
+    } else {
+        (output_sample_rate, true)
+    }
+}
 
 fn audio_worker(
     rx_cmd: Receiver<AudioCommand>,
@@ -682,21 +695,24 @@ fn audio_worker(
                     Err("Output Físico não encontrado.".to_string())
                 } else {
                     match (input_device.as_ref(), output_device.as_ref()) {
-                        // Full duplex runs off one clock: the playthrough ring buffer
-                        // hands frames straight from the capture callback to the render
-                        // callback, so streams opened at different rates would drain it
-                        // faster or slower than it fills — audible as drift and dropouts.
-                        // When the devices share no rate we refuse to start rather than
-                        // open a mismatch the ring buffer cannot reconcile.
-                        (Some(in_dev), Some(out_dev)) => pick_full_duplex(in_dev, out_dev)
-                            .map(|(in_cfgs, out_cfgs, _rate)| (in_cfgs, out_cfgs))
-                            .map_err(|e| {
-                                format!(
-                                    "❌ Entrada e saída não compartilham uma taxa de \
-                                         amostragem: {e}. Escolha dispositivos compatíveis ou \
-                                         use apenas um deles."
-                                )
-                            }),
+                        (Some(in_dev), Some(out_dev)) => match pick_full_duplex(in_dev, out_dev) {
+                            Ok((in_cfgs, out_cfgs, _rate)) => Ok((in_cfgs, out_cfgs)),
+                            Err(_) => {
+                                let in_cfgs =
+                                    pick_config(in_dev, StreamDirection::Input).map_err(|e| {
+                                        format!("❌ Entrada sem configuração utilizável: {e}")
+                                    });
+                                let out_cfgs = pick_config(out_dev, StreamDirection::Output)
+                                    .map_err(|e| {
+                                        format!("❌ Saída sem configuração utilizável: {e}")
+                                    });
+
+                                match (in_cfgs, out_cfgs) {
+                                    (Ok(in_cfgs), Ok(out_cfgs)) => Ok((in_cfgs, out_cfgs)),
+                                    (Err(msg), _) | (_, Err(msg)) => Err(msg),
+                                }
+                            }
+                        },
                         (Some(in_dev), None) => pick_config(in_dev, StreamDirection::Input)
                             .map(|cfgs| (cfgs, Vec::new()))
                             .map_err(|e| format!("❌ Entrada sem configuração utilizável: {e}")),
@@ -710,10 +726,43 @@ fn audio_worker(
                 let (input_configs, output_configs) = match negotiated {
                     Ok(configs) => configs,
                     Err(msg) => {
-                        let _ = tx_event.send(AudioEvent::StreamStarted(Err(msg)));
+                        let _ = tx_event.send(AudioEvent::StreamStarted {
+                            result: Err(msg),
+                            sample_rate_warning: None,
+                        });
                         continue;
                     }
                 };
+
+                let sample_rate_reconciliation = input_configs
+                    .first()
+                    .zip(output_configs.first())
+                    .map(|(input_config, output_config)| {
+                        let (effective_sample_rate, needs_resampling) =
+                            reconcile_sample_rate(input_config, output_config);
+                        let warning = needs_resampling.then(|| {
+                            format!(
+                                "⚠️ resampling ativo: {} → {} Hz",
+                                input_config.config.sample_rate().0,
+                                output_config.config.sample_rate().0
+                            )
+                        });
+                        (effective_sample_rate, warning)
+                    });
+
+                let effective_sample_rate = sample_rate_reconciliation
+                    .as_ref()
+                    .map(|(sample_rate, _)| *sample_rate)
+                    .or_else(|| {
+                        input_configs
+                            .first()
+                            .or_else(|| output_configs.first())
+                            .map(|cfg| cfg.config.sample_rate().0)
+                    })
+                    .unwrap_or(48_000);
+                let sample_rate_warning =
+                    sample_rate_reconciliation.and_then(|(_, warning)| warning);
+                let effective_s_rate = effective_sample_rate as f32;
 
                 // `max_block` is read off the config we are about to open, so it can
                 // only be computed once negotiation has settled.
@@ -735,6 +784,8 @@ fn audio_worker(
                 let state_clone = standalone_state.clone();
                 // Wrap analyzer_producer in Arc<Mutex<>> so it can be cloned for each config attempt
                 let analyzer_producer = Arc::new(Mutex::new(analyzer_producer));
+                cabinet_sr.store(effective_sample_rate, Ordering::Relaxed);
+                cabinet_max_block.store(max_block, Ordering::Relaxed);
 
                 if let (Some(DeviceSelection { left, right, .. }), Some(device)) =
                     (input.as_ref(), input_device.as_ref())
@@ -762,11 +813,9 @@ fn audio_worker(
                         // pipeline e os buffers de scratch são construídos uma única
                         // vez e movidos para dentro de qual braço for de fato
                         // utilizado.
-                        let s_rate = strict_config.sample_rate.0 as f32;
+                        let s_rate = effective_s_rate;
 
                         // ESTÁGIO 4: Cabinet IR gerenciado (biblioteca + engine, sem path hardcoded).
-                        cabinet_sr.store(s_rate as u32, Ordering::Relaxed);
-                        cabinet_max_block.store(max_block, Ordering::Relaxed);
                         {
                             // Resolver o IR ativo e publicar um runtime para este sample rate.
                             let mut hash = state_clone
@@ -1085,9 +1134,15 @@ fn audio_worker(
                 }
 
                 if let Some(err) = err_msg {
-                    let _ = tx_event.send(AudioEvent::StreamStarted(Err(err)));
+                    let _ = tx_event.send(AudioEvent::StreamStarted {
+                        result: Err(err),
+                        sample_rate_warning,
+                    });
                 } else {
-                    let _ = tx_event.send(AudioEvent::StreamStarted(Ok(())));
+                    let _ = tx_event.send(AudioEvent::StreamStarted {
+                        result: Ok(()),
+                        sample_rate_warning,
+                    });
                 }
             }
             AudioCommand::Stop => {
@@ -1235,9 +1290,13 @@ impl StandaloneApp {
                     revalidate_selection(&mut self.selected_output_idx, &self.available_outputs);
                     self.apply_audio_routing();
                 }
-                AudioEvent::StreamStarted(res) => {
+                AudioEvent::StreamStarted {
+                    result,
+                    sample_rate_warning,
+                } => {
                     self.is_loading = false;
-                    if let Err(msg) = res {
+                    self.sample_rate_warning = sample_rate_warning;
+                    if let Err(msg) = result {
                         eprintln!("[Audio Engine] ERRO Crítico do CPAL: {}", msg);
                         self.last_audio_error =
                             Some("⚠️ Limitação de Hardware: Buffer negado".to_string());
@@ -1305,23 +1364,6 @@ impl StandaloneApp {
         } else {
             None
         };
-
-        // Checar Mismatch de Sample Rate
-        if let (Some(in_idx), Some(out_idx)) = (self.selected_input_idx, self.selected_output_idx) {
-            // Unusable devices carry `sample_rate == 0`; comparing that would raise
-            // a bogus mismatch warning.
-            if let (Some(in_dev), Some(out_dev)) = (
-                self.available_inputs.get(in_idx).filter(|d| d.usable),
-                self.available_outputs.get(out_idx).filter(|d| d.usable),
-            ) {
-                if in_dev.sample_rate != out_dev.sample_rate {
-                    self.sample_rate_warning = Some(format!(
-                        "⚠️ Taxas Incompatíveis: IN {}Hz vs OUT {}Hz",
-                        in_dev.sample_rate, out_dev.sample_rate
-                    ));
-                }
-            }
-        }
 
         self.is_loading = true;
         let _ = self.tx_cmd.send(AudioCommand::ApplyRouting {
@@ -3070,6 +3112,45 @@ impl eframe::App for StandaloneApp {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         let _ = self.tx_cmd.send(AudioCommand::Stop);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cpal::{SampleFormat, SampleRate, SupportedBufferSize, SupportedStreamConfigRange};
+
+    fn picked_config(sample_rate: u32) -> PickedConfig {
+        let range = SupportedStreamConfigRange::new(
+            2,
+            SampleRate(sample_rate),
+            SampleRate(sample_rate),
+            SupportedBufferSize::Range { min: 64, max: 512 },
+            SampleFormat::F32,
+        );
+
+        PickedConfig {
+            config: range
+                .try_with_sample_rate(SampleRate(sample_rate))
+                .expect("fixed range should support its sample rate"),
+            max_block: 512,
+        }
+    }
+
+    #[test]
+    fn reconcile_sample_rate_uses_common_rate_without_resampling() {
+        let input = picked_config(48_000);
+        let output = picked_config(48_000);
+
+        assert_eq!(reconcile_sample_rate(&input, &output), (48_000, false));
+    }
+
+    #[test]
+    fn reconcile_sample_rate_uses_output_rate_when_resampling_is_needed() {
+        let input = picked_config(44_100);
+        let output = picked_config(48_000);
+
+        assert_eq!(reconcile_sample_rate(&input, &output), (48_000, true));
     }
 }
 
