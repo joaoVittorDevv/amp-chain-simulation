@@ -34,6 +34,14 @@ pub struct RtResampler {
 }
 
 impl RtResampler {
+    /// Input frames consumed per resampler chunk, and therefore the granularity
+    /// at which output chunks are emitted. Trades latency against efficiency:
+    /// 512 frames @ 44.1 kHz adds ~11.6 ms of staging latency worst case.
+    ///
+    /// Callers sizing a buffer that receives whole chunks should scale this by
+    /// the resample ratio — see [`output_frames_max`](RtResampler::output_frames_max).
+    pub const CHUNK_FRAMES: usize = 512;
+
     /// Create a new resampler.
     ///
     /// * `input_rate`  – sample rate of the incoming audio (Hz).
@@ -48,9 +56,7 @@ impl RtResampler {
 
         let ratio = output_rate as f64 / input_rate as f64;
 
-        // Chunk size trades latency against efficiency. 512 frames @ 44.1 kHz
-        // adds ~11.6 ms of staging-buffer latency worst case.
-        let chunk_size: usize = 512;
+        let chunk_size: usize = Self::CHUNK_FRAMES;
 
         let params = SincInterpolationParameters {
             sinc_len: 256,
@@ -131,20 +137,29 @@ impl RtResampler {
         mut on_chunk: impl FnMut(&[f32], &[f32]),
     ) {
         assert_eq!(input_l.len(), input_r.len());
-        let n = input_l.len();
-        if n == 0 {
-            return;
-        }
 
         let needed = self.chunk_size;
+        let mut offset = 0usize;
 
-        // Accumulate into staging.
-        self.staging[0][self.staged..self.staged + n].copy_from_slice(input_l);
-        self.staging[1][self.staged..self.staged + n].copy_from_slice(input_r);
-        self.staged += n;
+        // Consume the input incrementally rather than staging it whole: copy at
+        // most one chunk's worth at a time, draining whenever staging fills. The
+        // staging buffer therefore never has to hold a caller block, so a block
+        // larger than `max_block` costs an extra iteration instead of indexing
+        // out of bounds — a panic here would abort the audio thread.
+        while offset < input_l.len() {
+            let take = (needed - self.staged).min(input_l.len() - offset);
+            self.staging[0][self.staged..self.staged + take]
+                .copy_from_slice(&input_l[offset..offset + take]);
+            self.staging[1][self.staged..self.staged + take]
+                .copy_from_slice(&input_r[offset..offset + take]);
+            self.staged += take;
+            offset += take;
 
-        // Process every complete chunk.
-        while self.staged >= needed {
+            // Partial chunk — wait for more input rather than zero-padding.
+            if self.staged < needed {
+                break;
+            }
+
             let input = SequentialSliceOfVecs::new(&self.staging, 2, needed)
                 .expect("failed to create rubato input adapter");
             let mut output = SequentialSliceOfVecs::new_mut(&mut self.output, 2, self.output_frames_max)
@@ -160,14 +175,7 @@ impl RtResampler {
                 "FixedAsync::Input must consume exactly input_frames_next() frames"
             );
 
-            // Shift leftover frames to the front.
-            let leftover = self.staged - needed;
-            if leftover > 0 {
-                for ch in 0..2 {
-                    self.staging[ch].copy_within(needed..needed + leftover, 0);
-                }
-            }
-            self.staged = leftover;
+            self.staged = 0;
 
             // Deliver the resampled chunk — use `output_frames` from the
             // resampler, never the nominal ratio.

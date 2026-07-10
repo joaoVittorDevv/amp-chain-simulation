@@ -7,6 +7,7 @@ use distortion::core::audio_config::{
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
 use distortion::core::device_context::{DeviceContext, Direction};
 use distortion::core::device_identity::resolve_device;
+use distortion::core::dsp::rt_resampler::RtResampler;
 use distortion::core::dsp::{
     process_interleaved_block, sample_convert, AnalyzerDsp, AudioSnapshot, StandalonePipeline,
     FFT_SIZE,
@@ -22,7 +23,7 @@ use distortion::core::ui::{render_shared_panels, ActivePanel};
 use distortion::lab::Lab;
 use eframe::egui;
 use nih_plug::prelude::Enum;
-use rtrb::{Consumer, RingBuffer};
+use rtrb::{Consumer, Producer, RingBuffer};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -554,6 +555,60 @@ fn asio_duplex_device(
 /// we will not open them.
 type NegotiatedConfigs = Result<(Vec<PickedConfig>, Vec<PickedConfig>), String>;
 
+/// Shared handle to a ring producer written from an audio callback.
+type SharedProducer = Arc<Mutex<Producer<f32>>>;
+
+/// Publishes one block of processed frames: the mono mix to the analyzer ring,
+/// and — when playthrough is active — interleaved L/R to the output ring.
+///
+/// Both rings are lock-free; `try_lock` only guards the `Arc<Mutex<..>>` handle
+/// that lets a callback own its producer, and a contended or full ring drops the
+/// block rather than blocking the audio thread.
+fn publish_frames(
+    analyzer: &SharedProducer,
+    playthrough: &Option<SharedProducer>,
+    out_l: &[f32],
+    out_r: &[f32],
+) {
+    for i in 0..out_l.len().min(out_r.len()) {
+        let mix = (out_l[i] + out_r[i]) * 0.5;
+        if let Ok(mut ap) = analyzer.try_lock() {
+            let _ = ap.push(mix);
+        }
+        if let Some(ref pp) = playthrough {
+            if let Ok(mut p) = pp.try_lock() {
+                let _ = p.push(out_l[i]);
+                let _ = p.push(out_r[i]);
+            }
+        }
+    }
+}
+
+/// Emits one processed block downstream (T22).
+///
+/// The output device is the master clock. When the input device could not be
+/// opened at the output's rate, `resampler` is `Some` and the block is converted
+/// to the output rate before it reaches the rings — the output callback drains
+/// the playthrough ring one frame per output frame, so anything pushed at the
+/// input rate would otherwise play back pitch- and speed-shifted.
+///
+/// `RtResampler` emits on chunk boundaries, so a given call may publish several
+/// chunks, exactly one, or none at all while it stages a partial chunk.
+fn emit_processed_block(
+    resampler: &mut Option<RtResampler>,
+    analyzer: &SharedProducer,
+    playthrough: &Option<SharedProducer>,
+    out_l: &[f32],
+    out_r: &[f32],
+) {
+    match resampler {
+        Some(rs) => rs.feed(out_l, out_r, |res_l, res_r| {
+            publish_frames(analyzer, playthrough, res_l, res_r)
+        }),
+        None => publish_frames(analyzer, playthrough, out_l, out_r),
+    }
+}
+
 fn audio_worker(
     rx_cmd: Receiver<AudioCommand>,
     tx_event: Sender<AudioEvent>,
@@ -739,6 +794,26 @@ fn audio_worker(
                     None => None,
                 };
 
+                // Rate the playthrough ring is drained at. The output config that
+                // actually opens is chosen in a later retry loop, so this takes the
+                // preferred candidate — the same one `sample_rate_warning` reports.
+                let target_output_rate: Option<u32> = if has_both {
+                    output_configs.first().map(|cfg| cfg.config.sample_rate().0)
+                } else {
+                    None
+                };
+
+                // Worst-case rate conversion across every input candidate we may
+                // retry: a ratio above 1.0 means the input side pushes more frames
+                // than it consumes, so the ring must grow to match.
+                let max_resample_ratio: f64 = match target_output_rate {
+                    Some(out_rate) => input_configs
+                        .iter()
+                        .map(|cfg| out_rate as f64 / cfg.config.sample_rate().0 as f64)
+                        .fold(1.0, f64::max),
+                    None => 1.0,
+                };
+
                 // Size the shared ring for the largest negotiated retry candidate.
                 // Input DSP scratch space is sized from the concrete config attempted below.
                 let ring_buffer_max_block: usize = input_configs
@@ -750,7 +825,17 @@ fn audio_worker(
                     .max(buffer_size as usize);
 
                 let (pt_producer, pt_consumer) = if has_both {
-                    let (p, c) = RingBuffer::new((ring_buffer_max_block * 8).max(2048));
+                    // Two samples per frame, four blocks of slack — scaled by the
+                    // ratio because the resampler pushes output-rate frames.
+                    let ring_frames =
+                        (ring_buffer_max_block as f64 * max_resample_ratio).ceil() as usize;
+                    // The resampler emits a whole chunk at once while the output
+                    // callback drains gradually, so the ring must also hold several
+                    // full bursts however small the driver block turns out to be.
+                    let burst_frames =
+                        (RtResampler::CHUNK_FRAMES as f64 * max_resample_ratio).ceil() as usize;
+                    let floor_samples = (burst_frames * 4 * 2).max(2048);
+                    let (p, c) = RingBuffer::new((ring_frames * 8).max(floor_samples));
                     // Wrap in Arc<Mutex<>> so they can be cloned for each config attempt
                     (Some(Arc::new(Mutex::new(p))), Some(Arc::new(Mutex::new(c))))
                 } else {
@@ -831,6 +916,17 @@ fn audio_worker(
                             cabinet_mailbox.clone(),
                         );
 
+                        // ESTÁGIO 6: reamostragem para a taxa do dispositivo de saída
+                        // (T22). A pipeline roda em `cfg_rate` — a taxa que este
+                        // config de entrada de fato abriu — e só o que sai dela é
+                        // convertido, de modo que EQ, IR e cabinet continuam
+                        // coerentes com o `s_rate` usado para construí-los.
+                        // `None` quando as taxas já coincidem, e o bloco vai direto
+                        // para os rings sem custo algum.
+                        let mut resampler = target_output_rate
+                            .filter(|&out_rate| out_rate != cfg_rate)
+                            .map(|out_rate| RtResampler::new(s_rate, out_rate as f32, max_block));
+
                         // Buffers temporários para processamento in-place em bloco
                         let mut buf_l = vec![0.0; max_block];
                         let mut buf_r = vec![0.0; max_block];
@@ -855,19 +951,13 @@ fn audio_worker(
                                         &mut buf_r,
                                         &snap,
                                         |out_l, out_r| {
-                                            for i in 0..out_l.len() {
-                                                let mix = (out_l[i] + out_r[i]) * 0.5;
-                                                if let Ok(mut ap) = analyzer_for_callback.try_lock()
-                                                {
-                                                    let _ = ap.push(mix);
-                                                }
-                                                if let Some(ref pp) = pt_for_callback {
-                                                    if let Ok(mut p) = pp.try_lock() {
-                                                        let _ = p.push(out_l[i]);
-                                                        let _ = p.push(out_r[i]);
-                                                    }
-                                                }
-                                            }
+                                            emit_processed_block(
+                                                &mut resampler,
+                                                &analyzer_for_callback,
+                                                &pt_for_callback,
+                                                out_l,
+                                                out_r,
+                                            )
                                         },
                                     );
                                 },
@@ -896,19 +986,13 @@ fn audio_worker(
                                             &mut buf_r,
                                             &snap,
                                             |out_l, out_r| {
-                                                for i in 0..out_l.len() {
-                                                    let mix = (out_l[i] + out_r[i]) * 0.5;
-                                                    if let Ok(mut ap) = analyzer_for_i32.try_lock()
-                                                    {
-                                                        let _ = ap.push(mix);
-                                                    }
-                                                    if let Some(ref pp) = pt_for_i32 {
-                                                        if let Ok(mut p) = pp.try_lock() {
-                                                            let _ = p.push(out_l[i]);
-                                                            let _ = p.push(out_r[i]);
-                                                        }
-                                                    }
-                                                }
+                                                emit_processed_block(
+                                                    &mut resampler,
+                                                    &analyzer_for_i32,
+                                                    &pt_for_i32,
+                                                    out_l,
+                                                    out_r,
+                                                )
                                             },
                                         );
                                     },
@@ -938,19 +1022,13 @@ fn audio_worker(
                                             &mut buf_r,
                                             &snap,
                                             |out_l, out_r| {
-                                                for i in 0..out_l.len() {
-                                                    let mix = (out_l[i] + out_r[i]) * 0.5;
-                                                    if let Ok(mut ap) = analyzer_for_i16.try_lock()
-                                                    {
-                                                        let _ = ap.push(mix);
-                                                    }
-                                                    if let Some(ref pp) = pt_for_i16 {
-                                                        if let Ok(mut p) = pp.try_lock() {
-                                                            let _ = p.push(out_l[i]);
-                                                            let _ = p.push(out_r[i]);
-                                                        }
-                                                    }
-                                                }
+                                                emit_processed_block(
+                                                    &mut resampler,
+                                                    &analyzer_for_i16,
+                                                    &pt_for_i16,
+                                                    out_l,
+                                                    out_r,
+                                                )
                                             },
                                         );
                                     },
