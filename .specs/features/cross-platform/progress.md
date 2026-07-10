@@ -1,6 +1,6 @@
 # Cross-Platform Roadmap — Progresso
 
-Última atualização: 2026-07-09
+Última atualização: 2026-07-10
 
 ---
 
@@ -99,14 +99,14 @@ com fallback paths (branch `fix-find-faust-fallbacks`, ver Phase 3).
 
 ## ⏳ Phase 5 — Validação & CI (T26–T29)
 
-**Status:** Pendente
+**Status:** Em progresso
 
-| Task | Descrição |
-|------|-----------|
-| T26 | CI matrix (Linux + macOS) |
-| T27 | Docs de cross-platform e troubleshooting |
-| T28 | Bundle multi-plataforma |
-| T29 | Performance gate (< 5% regressão) |
+| Task | Descrição | Status |
+|------|-----------|--------|
+| T26 | CI matrix (Linux + macOS + Windows) | ✅ |
+| T27 | Docs de cross-platform e troubleshooting | ⏳ |
+| T28 | Bundle multi-plataforma | ⏳ |
+| T29 | Performance gate (< 5% regressão) | ⏳ |
 
 ---
 
@@ -119,6 +119,6 @@ com fallback paths (branch `fix-find-faust-fallbacks`, ver Phase 3).
 | Phase 2 — Áudio | T11–T16 | ✅ Mergeado |
 | Phase 3 — Windows/ASIO | T17–T20, T30 | ✅ Mergeado |
 | Phase 4 — Robustez | T21–T25, T31–T32 | ⏳ Pendente |
-| Phase 5 — Validação | T26–T29 | ⏳ Pendente |
+| Phase 5 — Validação | T26–T29 | 🚧 Em progresso (1/4) |
 
-**Total:** 22/32 tasks concluídas (69%)
+**Total:** 23/32 tasks concluídas (72%)
