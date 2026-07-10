@@ -81,3 +81,22 @@ strip = "none"
 build-support = { path = "build-support" }
 cc = "1.0"
 bindgen = "0.71.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "dsp_pipeline"
+harness = false
+
+[[bench]]
+name = "faust_eq"
+harness = false
+
+[[bench]]
+name = "neural_drive"
+harness = false
+
+[[bench]]
+name = "resampler"
+harness = false
