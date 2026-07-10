@@ -81,19 +81,39 @@ com fallback paths (branch `fix-find-faust-fallbacks`, ver Phase 3).
 
 ---
 
-## ⏳ Phase 4 — Robustez do Ciclo de Vida (T21–T25, T31–T32)
+## 🚧 Phase 4 — Robustez do Ciclo de Vida (T21–T25, T31–T32)
 
-**Status:** Pendente
+**Status:** Em progresso
 
-| Task | Descrição |
-|------|-----------|
-| T21 | Resampler para drift de clock |
-| T22 | Recuperação de erro de dispositivo |
-| T23 | Device hotplug (reconectar stream) |
-| T24 | Telemetria de underrun/overrun |
-| T25 | Log de latência e buffer |
-| T31 | Testes de stress multi-dispositivo |
-| T32 | Testes de recuperação de erro |
+| Task | Descrição | Status |
+|------|-----------|--------|
+| T21 | Reconciliação de sample rate (output-as-master) | ✅ |
+| T22 | Recuperação de erro de dispositivo | ⏳ |
+| T23 | Device hotplug (reconectar stream) | ⏳ |
+| T24 | Telemetria de underrun/overrun | ⏳ |
+| T25 | Log de latência e buffer | ⏳ |
+| T31 | Testes de stress multi-dispositivo | ⏳ |
+| T32 | Testes de recuperação de erro | ⏳ |
+
+### T21 — Sample Rate Reconciliation
+
+**Status:** ✅ Concluído e mergeado em `main`
+**Merge commit:** `962e790` (4 commits no branch `phase-4-T21-sample-rate-reconciliation`)
+
+**Commits:**
+- `4073041` feat: reconcile sample rates with output-as-master fallback (T21/CROSS-11)
+- `2557d11` fix: move reconcile_sample_rate to audio_config.rs + use per-config rate (T21 review)
+- `9c58e3c` fix: restore output-as-master rate + isolate cabinet_sr to input arm (T21 review round 2)
+- `207c74d` fix: use per-iteration config rate for DSP; hoist cabinet stores into success branch (T21 review round 3)
+
+**Entregáveis:**
+- `reconcile_sample_rate()` em `src/core/audio_config.rs` com 2 testes
+- DSP, Faust, Neural, MLC e Cabinet inicializados com a taxa do config que realmente abre (por iteração, não hoisted)
+- `cabinet_sr`/`cabinet_max_block`/`cabinet_mailbox.publish()` só executam após sucesso do stream
+- Ring buffer dimensionado pelo maior config candidato (input + output)
+- Warning de resampling quando taxas divergem
+
+**Nota:** O DSP usa a taxa de **input** por iteração até o T22 (resampler) aterrar. Quando o T22 inserir `rubato::Async` no caminho de input, o DSP passará a usar a taxa efetiva (output). Usar a taxa de output sem resampler causaria offsets de EQ e dessincronização de IR — a divergência da spec original é intencional e corrige um bug de áudio.
 
 ---
 
@@ -121,4 +141,4 @@ com fallback paths (branch `fix-find-faust-fallbacks`, ver Phase 3).
 | Phase 4 — Robustez | T21–T25, T31–T32 | ⏳ Pendente |
 | Phase 5 — Validação | T26–T29 | 🚧 Em progresso (1/4) |
 
-**Total:** 23/32 tasks concluídas (72%)
+**Total:** 24/32 tasks concluídas (75%)
