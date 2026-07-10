@@ -68,21 +68,36 @@ polly must:
 
 ## Build & Dev Commands
 
-`cargo xtask` is the canonical entry point. `make <target>` delegates to it on Unix.
+`cargo xtask` is the canonical entry point on Linux, macOS, and Windows. See
+[`docs/BUILD.md`](docs/BUILD.md) for platform toolchains, environment variables,
+and neural backend selection. `make <target>` is an optional Unix shortcut that
+delegates to the same commands.
 
 ```bash
 cargo xtask check-env   # Validate Faust, Mojo, and directory permissions
 cargo xtask pre-build   # Compile Faust .dsp + Mojo .mojo sources manually
 cargo xtask build       # pre-build + cargo build --release
-cargo xtask run         # pre-build + launch standalone (sets LD_LIBRARY_PATH)
+cargo xtask run         # pre-build + launch standalone with the platform library path
 cargo xtask bundle distortion --release  # VST3/CLAP distribution
 cargo xtask clean       # Remove dsp/*.hpp, neural/libneural.*, target/
 ```
 
-Unix shortcuts (delegate to xtask):
+Release bundles always force the Rust neural backend through
+`DISTORTION_FORCE_RUST_NEURAL`. Development builds use Mojo when it is available
+and fall back to Rust otherwise.
+
+Unix shortcuts delegate to `cargo xtask`:
+
 ```bash
-make run / make build / make bundle / make clean / make check-env
+make check-env
+make build
+make run
+make bundle
+make clean
 ```
+
+Use [`docs/UAT.md`](docs/UAT.md) for manual CoreAudio, WASAPI, and ASIO release
+validation on real hardware.
 
 - Standalone binary: `cargo run --release --bin standalone`
 - Test suite: `cargo test` runs unit tests plus `tests/lab_integration.rs`

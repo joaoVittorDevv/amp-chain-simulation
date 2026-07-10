@@ -3,6 +3,10 @@
 > **Este documento é o manual de operações do projeto.**  
 > Todo agente ou desenvolvedor que assumir o projeto deve começar por aqui.
 
+Para preparar o ambiente em Linux, macOS ou Windows, consulte o
+[guia de build multiplataforma](docs/BUILD.md). Antes de uma release, execute
+também o [guião de UAT manual](docs/UAT.md) em hardware real.
+
 ---
 
 ## Índice
