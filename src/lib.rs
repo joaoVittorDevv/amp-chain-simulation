@@ -216,6 +216,10 @@ pub struct BaseIO {
     limiter: dsp::PeakLimiter,
     /// Live engine sample rate (Hz), kept fresh by `initialize()`.
     sample_rate: f32,
+    /// Last reported latency in samples, used to suppress redundant host
+    /// notifications (T25). Only call `set_latency_samples` when the
+    /// computed value differs from this.
+    last_reported_latency: u32,
 
     #[cfg(feature = "lab")]
     lab: Option<Arc<Lab>>,
@@ -254,6 +258,7 @@ impl Default for BaseIO {
 
             limiter: dsp::PeakLimiter::new(-1.0, 50.0, 48_000.0),
             sample_rate: 48_000.0,
+            last_reported_latency: 0,
 
             #[cfg(feature = "lab")]
             lab: None,
@@ -890,6 +895,26 @@ impl Plugin for BaseIO {
             }
         }
 
+        // Report pipeline latency to the host DAW once during initialization (T25).
+        // Latency is fixed for a given configuration (cabinet state, resampler config)
+        // and does not change during process(), so the notification lives here.
+        //
+        // Cabinet FFT: uniform partitioned convolution (fft-convolver) is zero-latency
+        // by design — impulse at input[0] -> output[0]. We still pass Some(0) to mark
+        // the stage as active, keeping the signature ready for non-zero values.
+        let cabinet_fft_delay = if self.cabinet_engine.current_hash().is_some() {
+            Some(0u32)
+        } else {
+            None
+        };
+        // Resampler (T22): not yet implemented — pass None.
+        let resampler_delay: Option<u32> = None;
+        let latency = compute_latency(cabinet_fft_delay, resampler_delay);
+        if latency != self.last_reported_latency {
+            _context.set_latency_samples(latency);
+            self.last_reported_latency = latency;
+        }
+
         true
     }
 
@@ -993,9 +1018,6 @@ impl Plugin for BaseIO {
         let limiter_ceiling = self.params.limiter_ceiling.smoothed.next();
         let limiter_release = self.params.limiter_release.smoothed.next();
         let sample_rate = self.sample_rate;
-
-        // Mojo é síncrono e zero-copy — latência 0.
-        _context.set_latency_samples(0);
 
         // Apply mono / input routing FIRST before doing any DSP processing!
         for mut channel_samples in buffer.iter_samples() {
@@ -1258,3 +1280,35 @@ impl Vst3Plugin for BaseIO {
 
 nih_export_clap!(BaseIO);
 nih_export_vst3!(BaseIO);
+
+/// Sum optional latency contributions from pipeline stages with algorithmic delay.
+///
+/// Returns the total latency in samples. Zero-latency stages (Faust EQ, Mojo neural,
+/// MLC Zero-V, Pre-EQ convolver, brickwall limiter) are excluded.
+///
+/// Pipeline stages with algorithmic delay:
+/// - Cabinet FFT convolver: 0 samples — uniform partitioned convolution (UPC)
+///   per `fft-convolver` crate's `test_zero_latency`. Impulse at input[0] produces
+///   output at output[0]. When the crate exposes a latency API in the future, pass
+///   that value here.
+/// - Resampler (future T22): `rubato::Async::output_delay()` samples when active.
+///
+/// Pass `None` for any stage that is bypassed or uninitialized.
+pub fn compute_latency(cabinet_fft_delay: Option<u32>, resampler_delay: Option<u32>) -> u32 {
+    cabinet_fft_delay.unwrap_or(0) + resampler_delay.unwrap_or(0)
+}
+
+#[cfg(test)]
+mod latency_tests {
+    use super::compute_latency;
+
+    #[test]
+    fn compute_latency_sums_cabinet_and_resampler_delays() {
+        assert_eq!(compute_latency(Some(256), Some(31)), 287);
+    }
+
+    #[test]
+    fn compute_latency_omits_inactive_cabinet() {
+        assert_eq!(compute_latency(None, Some(31)), 31);
+    }
+}
