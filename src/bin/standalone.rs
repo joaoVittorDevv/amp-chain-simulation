@@ -648,18 +648,25 @@ fn observe_playthrough_fill(
 fn publish_frames(
     analyzer: &SharedProducer,
     playthrough: &Option<SharedProducer>,
+    audio_status: &AudioStatus,
     out_l: &[f32],
     out_r: &[f32],
 ) {
     for i in 0..out_l.len().min(out_r.len()) {
         let mix = (out_l[i] + out_r[i]) * 0.5;
         if let Ok(mut ap) = analyzer.try_lock() {
-            let _ = ap.push(mix);
+            if ap.push(mix).is_err() {
+                audio_status.note_overflow();
+            }
         }
         if let Some(ref pp) = playthrough {
             if let Ok(mut p) = pp.try_lock() {
-                let _ = p.push(out_l[i]);
-                let _ = p.push(out_r[i]);
+                if p.push(out_l[i]).is_err() {
+                    audio_status.note_overflow();
+                }
+                if p.push(out_r[i]).is_err() {
+                    audio_status.note_overflow();
+                }
             }
         }
     }
@@ -679,14 +686,15 @@ fn emit_processed_block(
     resampler: &mut Option<RtResampler>,
     analyzer: &SharedProducer,
     playthrough: &Option<SharedProducer>,
+    audio_status: &AudioStatus,
     out_l: &[f32],
     out_r: &[f32],
 ) {
     match resampler {
         Some(rs) => rs.feed(out_l, out_r, |res_l, res_r| {
-            publish_frames(analyzer, playthrough, res_l, res_r)
+            publish_frames(analyzer, playthrough, audio_status, res_l, res_r)
         }),
-        None => publish_frames(analyzer, playthrough, out_l, out_r),
+        None => publish_frames(analyzer, playthrough, audio_status, out_l, out_r),
     }
 }
 
@@ -963,6 +971,7 @@ fn audio_worker(
                         let frames_for_callback = driver_buffer_frames.clone();
                         let rate_for_callback = driver_buffer_rate.clone();
                         let drift_for_callback = drift_observation.clone();
+                        let status_for_callback = audio_status.clone();
 
                         // INICIALIZAÇÃO DSP: Fora do loop de processamento! Comum aos
                         // três formatos nativos suportados (F32/I32/I16, T15) — cada
@@ -1061,6 +1070,7 @@ fn audio_worker(
                                                 &mut resampler,
                                                 &analyzer_for_callback,
                                                 &pt_for_callback,
+                                                &status_for_callback,
                                                 out_l,
                                                 out_r,
                                             )
@@ -1084,6 +1094,7 @@ fn audio_worker(
                                 let rate_for_i32 = rate_for_callback.clone();
                                 let drift_for_i32 = drift_for_callback.clone();
                                 let mut last_drift_sequence = 0;
+                                let status_for_i32 = status_for_callback.clone();
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i32], _: &_| {
@@ -1111,6 +1122,7 @@ fn audio_worker(
                                                     &mut resampler,
                                                     &analyzer_for_i32,
                                                     &pt_for_i32,
+                                                    &status_for_i32,
                                                     out_l,
                                                     out_r,
                                                 )
@@ -1134,6 +1146,7 @@ fn audio_worker(
                                 let rate_for_i16 = rate_for_callback.clone();
                                 let drift_for_i16 = drift_for_callback.clone();
                                 let mut last_drift_sequence = 0;
+                                let status_for_i16 = status_for_callback.clone();
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i16], _: &_| {
@@ -1161,6 +1174,7 @@ fn audio_worker(
                                                     &mut resampler,
                                                     &analyzer_for_i16,
                                                     &pt_for_i16,
+                                                    &status_for_i16,
                                                     out_l,
                                                     out_r,
                                                 )
@@ -1246,6 +1260,7 @@ fn audio_worker(
                             cpal::SampleFormat::F32 => {
                                 let status_err = audio_status.clone();
                                 let mut frames_since_observation = 0;
+                                let status_for_callback = audio_status.clone();
                                 device.build_output_stream(
                                 &strict_config,
                                 move |data: &mut [f32], _: &_| {
@@ -1253,7 +1268,21 @@ fn audio_worker(
                                         let (l_sample, r_sample) =
                                             if let Some(ref pc) = pt_for_callback {
                                                 if let Ok(mut c) = pc.try_lock() {
-                                                    (c.pop().unwrap_or(0.0), c.pop().unwrap_or(0.0))
+                                                    let l = match c.pop() {
+                                                        Ok(v) => v,
+                                                        Err(_) => {
+                                                            status_for_callback.note_underrun();
+                                                            0.0
+                                                        }
+                                                    };
+                                                    let r = match c.pop() {
+                                                        Ok(v) => v,
+                                                        Err(_) => {
+                                                            status_for_callback.note_underrun();
+                                                            0.0
+                                                        }
+                                                    };
+                                                    (l, r)
                                                 } else {
                                                     (0.0, 0.0)
                                                 }
@@ -1282,6 +1311,7 @@ fn audio_worker(
                             }
                             cpal::SampleFormat::I16 => {
                                 let status_err = audio_status.clone();
+                                let status_for_i16 = audio_status.clone();
                                 let pt_for_i16 = pt_for_callback.clone();
                                 let drift_for_i16 = drift_for_callback.clone();
                                 let mut frames_since_observation = 0;
@@ -1293,7 +1323,21 @@ fn audio_worker(
                                                 pt_for_i16
                                             {
                                                 if let Ok(mut c) = pc.try_lock() {
-                                                    (c.pop().unwrap_or(0.0), c.pop().unwrap_or(0.0))
+                                                    let l = match c.pop() {
+                                                        Ok(v) => v,
+                                                        Err(_) => {
+                                                            status_for_i16.note_underrun();
+                                                            0.0
+                                                        }
+                                                    };
+                                                    let r = match c.pop() {
+                                                        Ok(v) => v,
+                                                        Err(_) => {
+                                                            status_for_i16.note_underrun();
+                                                            0.0
+                                                        }
+                                                    };
+                                                    (l, r)
                                                 } else {
                                                     (0.0, 0.0)
                                                 }
@@ -1768,6 +1812,19 @@ impl eframe::App for StandaloneApp {
                                 self.is_loading = true;
                             }
                         });
+
+                        let underruns = self.audio_status.underruns();
+                        let overflows = self.audio_status.overflows();
+                        if underruns != 0 || overflows != 0 {
+                            ui.separator();
+                            ui.heading("📊 Telemetria de Áudio");
+                            if underruns != 0 {
+                                ui.label(format!("Underruns: {underruns}"));
+                            }
+                            if overflows != 0 {
+                                ui.label(format!("Overflows: {overflows}"));
+                            }
+                        }
 
                         ui.separator();
 
