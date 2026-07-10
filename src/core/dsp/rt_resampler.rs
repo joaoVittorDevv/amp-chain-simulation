@@ -13,6 +13,13 @@ use rubato::{
     FixedAsync, Resampler, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
+/// Proportional controller gain for clock-drift compensation (T32).
+const KP: f64 = 0.05;
+/// Target ring-buffer fill ratio.
+const TARGET_FILL: f64 = 0.5;
+/// Number of recent corrections averaged before changing the ratio.
+const TRIM_HISTORY: usize = 16;
+
 /// A real-time async resampler that converts between two sample rates on the
 /// audio thread without allocation.
 ///
@@ -31,6 +38,10 @@ pub struct RtResampler {
     chunk_size: usize,
     /// Cached value of `output_frames_max()` so callers can size scratch buffers.
     output_frames_max: usize,
+    /// Fixed-size correction history for drift-controller smoothing.
+    trim_history: [f64; TRIM_HISTORY],
+    trim_history_len: usize,
+    trim_history_index: usize,
 }
 
 impl RtResampler {
@@ -89,6 +100,9 @@ impl RtResampler {
             staged: 0,
             chunk_size,
             output_frames_max,
+            trim_history: [0.0; TRIM_HISTORY],
+            trim_history_len: 0,
+            trim_history_index: 0,
         }
     }
 
@@ -117,6 +131,32 @@ impl RtResampler {
     /// Current resample ratio (output_rate / input_rate).
     pub fn resample_ratio(&self) -> f64 {
         self.inner.resample_ratio()
+    }
+
+    /// Adjust the resample ratio to keep ring-buffer fill near 50%.
+    ///
+    /// Call approximately once per second. `fill_ratio` is the current number
+    /// of buffered frames divided by total ring capacity (0.0–1.0).
+    pub fn trim_ratio(&mut self, fill_ratio: f64) {
+        let error = TARGET_FILL - fill_ratio;
+        // Limit each measurement to ±0.1% to avoid audible artifacts.
+        let correction = (error * KP).clamp(-0.001, 0.001);
+
+        self.trim_history[self.trim_history_index] = correction;
+        self.trim_history_index = (self.trim_history_index + 1) % TRIM_HISTORY;
+        self.trim_history_len = (self.trim_history_len + 1).min(TRIM_HISTORY);
+
+        let smoothed_correction = self.trim_history[..self.trim_history_len]
+            .iter()
+            .sum::<f64>()
+            / self.trim_history_len as f64;
+        let relative_ratio = 1.0 + smoothed_correction;
+
+        // rubato 1.0 uses a boolean ramp flag. Ramping applies the new ratio
+        // smoothly over the next processed chunk.
+        self.inner
+            .set_resample_ratio_relative(relative_ratio, true)
+            .expect("bounded drift correction must be a valid resample ratio");
     }
 
     /// Feed a block of deinterleaved L/R samples into the staging buffer.
@@ -390,6 +430,47 @@ mod tests {
         let sd = resampler.staging_max_delay_input_frames();
         assert!(sd > 0, "staging delay should be non-zero");
         assert_eq!(sd, resampler.chunk_size - 1);
+    }
+
+    #[test]
+    fn trim_ratio_clamps_each_correction_to_one_tenth_percent() {
+        let mut resampler = RtResampler::new(44_100.0, 48_000.0, 512);
+        let nominal_ratio = 48_000.0 / 44_100.0;
+        let silence = vec![0.0; RtResampler::CHUNK_FRAMES];
+
+        resampler.trim_ratio(0.0);
+        resampler.feed(&silence, &silence, |_, _| {});
+
+        assert!((resampler.resample_ratio() - nominal_ratio * 1.001).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn trim_ratio_averages_recent_corrections() {
+        let mut resampler = RtResampler::new(44_100.0, 48_000.0, 512);
+        let nominal_ratio = 48_000.0 / 44_100.0;
+        let silence = vec![0.0; RtResampler::CHUNK_FRAMES];
+
+        resampler.trim_ratio(0.0);
+        resampler.feed(&silence, &silence, |_, _| {});
+        resampler.trim_ratio(1.0);
+        resampler.feed(&silence, &silence, |_, _| {});
+
+        assert!((resampler.resample_ratio() - nominal_ratio).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn trim_ratio_history_is_bounded_to_sixteen_measurements() {
+        let mut resampler = RtResampler::new(44_100.0, 48_000.0, 512);
+        let nominal_ratio = 48_000.0 / 44_100.0;
+        let silence = vec![0.0; RtResampler::CHUNK_FRAMES];
+
+        for _ in 0..TRIM_HISTORY {
+            resampler.trim_ratio(0.0);
+        }
+        resampler.trim_ratio(1.0);
+        resampler.feed(&silence, &silence, |_, _| {});
+
+        assert!((resampler.resample_ratio() - nominal_ratio * 1.000875).abs() < 1.0e-12);
     }
 
     #[test]
