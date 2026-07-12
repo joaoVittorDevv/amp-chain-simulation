@@ -105,18 +105,19 @@ ASIO SDK and its environment variable are required only when you enable the
 `asio` feature.
 
 1. Download and extract the Steinberg ASIO SDK.
-2. Set `ASIO_DIR` to the SDK root and keep `LIBCLANG_PATH` configured.
+2. Set `CPAL_ASIO_DIR` to the SDK root (this is the variable the `asio-sys`
+   build script reads) and keep `LIBCLANG_PATH` configured.
 3. Run the pre-build, then pass the feature to Cargo:
 
 ```powershell
-$env:ASIO_DIR = "C:\SDKs\asiosdk"
+$env:CPAL_ASIO_DIR = "C:\SDKs\asiosdk"
 $env:LIBCLANG_PATH = "C:\Program Files\LLVM\bin"
 cargo xtask pre-build
 cargo build --release --features asio
 cargo run --release --features asio --bin standalone
 ```
 
-Do not set `ASIO_DIR` for a normal WASAPI build.
+Do not set `CPAL_ASIO_DIR` for a normal WASAPI build.
 
 ## Neural backend selection
 

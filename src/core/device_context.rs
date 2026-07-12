@@ -9,6 +9,7 @@
 //! [`DeviceContext::from_config_result`] instead keeps the device and records
 //! *why* it is unusable, so the UI can list it greyed out with the reason.
 
+use crate::core::audio_config::{INPUT_FORMATS, OUTPUT_FORMATS};
 use cpal::{SampleFormat, SupportedStreamConfig};
 use std::fmt;
 
@@ -25,15 +26,14 @@ pub enum Direction {
 impl Direction {
     /// Sample formats routing can actually build a stream for.
     ///
-    /// These mirror the `match config.sample_format()` arms in the standalone's
-    /// audio worker. Both matches end in an explicit `StreamConfigNotSupported`,
-    /// so any format missing here fails when the stream is built — which is why
-    /// a device offering only such a format must be marked unusable up front
-    /// rather than enabled in the picker and rejected later.
+    /// Delegates to `audio_config`'s format lists — the same ones stream
+    /// negotiation uses — so the picker's "usable" verdict can never diverge
+    /// from what `build_*_stream` accepts. (They diverged once: the output list
+    /// here missed I32 and every 24-bit ASIO device showed as unavailable.)
     pub const fn accepted_formats(self) -> &'static [SampleFormat] {
         match self {
-            Direction::Input => &[SampleFormat::F32, SampleFormat::I32, SampleFormat::I16],
-            Direction::Output => &[SampleFormat::F32, SampleFormat::I16],
+            Direction::Input => &INPUT_FORMATS,
+            Direction::Output => &OUTPUT_FORMATS,
         }
     }
 
@@ -253,31 +253,24 @@ mod tests {
         assert!(dev.unusable_reason.is_some());
     }
 
-    /// I32 is an input-only arm in the router, so the *same* negotiated config
-    /// must come out usable on the way in and unusable on the way out.
+    /// Both directions have an I32 arm (24-bit ASIO drivers expose Int32LSB
+    /// and often nothing else), so an I32 device is usable both ways.
     #[test]
-    fn i32_is_usable_as_input_but_not_as_output() {
-        let as_input = DeviceContext::from_config_result(
-            "Interface",
-            "Interface",
-            0,
-            Direction::Input,
-            ok_config_with(2, SampleFormat::I32),
-            vec![SampleFormat::I32],
-        );
-        let as_output = DeviceContext::from_config_result(
-            "Interface",
-            "Interface",
-            0,
-            Direction::Output,
-            ok_config_with(2, SampleFormat::I32),
-            vec![SampleFormat::I32],
-        );
+    fn i32_is_usable_in_both_directions() {
+        for direction in [Direction::Input, Direction::Output] {
+            let dev = DeviceContext::from_config_result(
+                "Interface",
+                "Interface",
+                0,
+                direction,
+                ok_config_with(2, SampleFormat::I32),
+                vec![SampleFormat::I32],
+            );
 
-        assert!(as_input.usable);
-        assert!(!as_output.usable);
-        let reason = as_output.unusable_reason.expect("needs a reason");
-        assert!(reason.contains("Formato I32 não suportado"), "{reason}");
+            assert!(dev.usable, "{direction:?} rejected I32");
+            assert_eq!(dev.unusable_reason, None);
+            assert_eq!(dev.channels, 2);
+        }
     }
 
     /// A format neither direction handles: the host negotiates it happily, so
@@ -305,12 +298,12 @@ mod tests {
     #[test]
     fn unsupported_format_device_reports_no_negotiated_values() {
         let dev = DeviceContext::from_config_result(
-            "I32 out",
-            "I32 out",
+            "U16 out",
+            "U16 out",
             0,
             Direction::Output,
-            ok_config_with(8, SampleFormat::I32),
-            vec![SampleFormat::I32],
+            ok_config_with(8, SampleFormat::U16),
+            vec![SampleFormat::U16],
         );
 
         assert!(!dev.usable);

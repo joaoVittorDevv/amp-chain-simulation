@@ -28,11 +28,12 @@ const MAX_BLOCK_CEILING: usize = 1 << 16;
 pub const INPUT_FORMATS: [SampleFormat; 3] =
     [SampleFormat::F32, SampleFormat::I32, SampleFormat::I16];
 
-/// Output formats the callback can write, in order of preference. There is no
-/// `I32` arm on the output stream, so negotiating `I32` here would hand
-/// `build_output_stream` a format it rejects — on a device that advertises
-/// `I32` but not `F32` that would turn a working `I16` stream into an error.
-pub const OUTPUT_FORMATS: [SampleFormat; 2] = [SampleFormat::F32, SampleFormat::I16];
+/// Output formats the callback can write, in order of preference.
+/// Mirrors the `match config.sample_format()` arms of the output stream.
+/// `I32` matters on Windows: 24-bit ASIO drivers expose `Int32LSB` and often
+/// nothing else, so without it those devices have no usable output config.
+pub const OUTPUT_FORMATS: [SampleFormat; 3] =
+    [SampleFormat::F32, SampleFormat::I32, SampleFormat::I16];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamDirection {
@@ -496,16 +497,16 @@ mod tests {
     }
 
     #[test]
-    fn pick_config_output_direction_never_negotiates_i32() {
-        // The output callback has no I32 arm; I16 must win even though I32
-        // outranks it on the input side.
+    fn pick_config_output_direction_prefers_i32_over_i16() {
+        // The output stream has an I32 arm (24-bit ASIO drivers expose
+        // Int32LSB and often nothing else), and it outranks I16.
         let ranges = [
-            fixed(SampleFormat::I32, 48_000),
             fixed(SampleFormat::I16, 48_000),
+            fixed(SampleFormat::I32, 48_000),
         ];
         let picked = pick_from_ranges(&ranges, SampleRate(48_000), 2, &OUTPUT_FORMATS);
         assert!(!picked.is_empty(), "expected configs");
-        assert_eq!(picked[0].config.sample_format(), SampleFormat::I16);
+        assert_eq!(picked[0].config.sample_format(), SampleFormat::I32);
     }
 
     #[test]
@@ -716,10 +717,11 @@ mod tests {
             rate_intervals(&ranges, &INPUT_FORMATS),
             vec![(44_100, 96_000), (48_000, 48_000)]
         );
-        // The output callback has no I32 arm, so that interval must not count.
+        // Output supports the same formats as input (F32/I32/I16), so the
+        // I32 interval counts on both directions; U8 and inverted stay out.
         assert_eq!(
             rate_intervals(&ranges, &OUTPUT_FORMATS),
-            vec![(44_100, 96_000)]
+            vec![(44_100, 96_000), (48_000, 48_000)]
         );
     }
 

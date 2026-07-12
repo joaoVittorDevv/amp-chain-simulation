@@ -42,6 +42,16 @@ impl AudioStatus {
         }
     }
 
+    /// Clears the pending error and every counter. Called when a new routing is
+    /// applied so the telemetry describes the current streams, not the whole
+    /// process lifetime.
+    pub fn reset(&self) {
+        self.code.store(NO_ERROR, Ordering::Release);
+        self.dropped_errors.store(0, Ordering::Relaxed);
+        self.underruns.store(0, Ordering::Relaxed);
+        self.overflows.store(0, Ordering::Relaxed);
+    }
+
     pub fn set_error(&self, kind: ErrorKind) {
         if kind == ErrorKind::NoError {
             return;

@@ -69,10 +69,21 @@ fn main() {
     let have_mojo = !force_rust && mojo_bin.is_some() && neural_out.exists();
 
     // ── C++ wrapper compilation ───────────────────────────────────────────────
+    // Faust upstream builds its generated code with fast-math; the MLC module is
+    // ~38k lines of filter arithmetic where MSVC's default /fp:precise (and its
+    // /O2 cap for opt_level(3)) costs real headroom on the audio thread. The
+    // Rust-side NaN sanitization is unaffected — it is compiled by rustc.
+    let fast_math = if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        "/fp:fast"
+    } else {
+        "-ffast-math"
+    };
+
     cc::Build::new()
         .cpp(true)
         .file(dsp_dir.join("wrapper.cpp"))
         .opt_level(3)
+        .flag(fast_math)
         .warnings(false)
         .compile("faust_dsp");
 
@@ -80,6 +91,7 @@ fn main() {
         .cpp(true)
         .file(dsp_dir.join("mlc_zero_v_wrapper.cpp"))
         .opt_level(3)
+        .flag(fast_math)
         .warnings(false)
         .compile("mlc_zero_v_dsp");
 

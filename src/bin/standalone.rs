@@ -1,8 +1,8 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::Stream;
 use distortion::core::audio_config::{
-    format_latency, pick_config, pick_full_duplex, reconcile_sample_rate, PickedConfig,
-    StreamDirection, FALLBACK_MAX_BLOCK,
+    pick_config, pick_full_duplex, reconcile_sample_rate, PickedConfig, StreamDirection,
+    FALLBACK_MAX_BLOCK,
 };
 use distortion::core::audio_status::{AudioStatus, ErrorKind};
 use distortion::core::cabinet::{CabinetLibrary, CabinetMailbox, CabinetRuntime};
@@ -25,10 +25,12 @@ use distortion::lab::Lab;
 use eframe::egui;
 use nih_plug::prelude::Enum;
 use rtrb::{Consumer, Producer, RingBuffer};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 
 /// Default cabinet IR embedded in the standalone binary (relative to src/bin/).
 const DEFAULT_CABINET_IR: &[u8] = include_bytes!("../../neural/drive/cabinet_ir.wav");
@@ -387,8 +389,7 @@ struct StandaloneApp {
     buffer_range_min: u32,
     buffer_range_max: u32,
 
-    driver_buffer_frames: Arc<AtomicU64>,
-    driver_buffer_rate: Arc<AtomicU64>,
+    latency_stats: Arc<LatencyStats>,
 
     sample_rate_warning: Option<String>,
     /// Lock-free channel for stream errors raised on the audio thread (T23).
@@ -396,6 +397,13 @@ struct StandaloneApp {
     last_audio_error: Option<String>,
     last_audio_error_details: Option<String>,
     show_error_popup: bool,
+
+    /// underruns+overflows total last seen by the UI; detects new glitch
+    /// episodes and counter resets (a new routing zeroes the counters).
+    prev_glitch_total: u64,
+    /// Timestamps of recent glitch episodes (rolling 60 s window). Three or
+    /// more within the window raise the clock-drift warning banner.
+    recent_glitches: VecDeque<Instant>,
 
     input_is_mono: bool,
     output_is_mono: bool,
@@ -572,8 +580,91 @@ fn stream_error_kind(err: cpal::StreamError) -> ErrorKind {
 
 /// Shared handle to a ring producer written from an audio callback.
 type SharedProducer = Arc<Mutex<Producer<f32>>>;
-/// Shared handle to the playthrough consumer drained by the output callback.
-type SharedConsumer = Arc<Mutex<Consumer<f32>>>;
+
+/// Lock-free latency telemetry: each audio callback publishes what it actually
+/// observes (block size, rate, ring fill) and the UI composes the end-to-end
+/// figure. Values stay zero until the corresponding stream reports in.
+struct LatencyStats {
+    input_frames: AtomicU64,
+    input_rate: AtomicU64,
+    ring_fill_samples: AtomicU64,
+    output_frames: AtomicU64,
+    output_rate: AtomicU64,
+}
+
+impl LatencyStats {
+    const fn new() -> Self {
+        Self {
+            input_frames: AtomicU64::new(0),
+            input_rate: AtomicU64::new(0),
+            ring_fill_samples: AtomicU64::new(0),
+            output_frames: AtomicU64::new(0),
+            output_rate: AtomicU64::new(0),
+        }
+    }
+
+    fn reset(&self) {
+        self.input_frames.store(0, Ordering::Relaxed);
+        self.input_rate.store(0, Ordering::Relaxed);
+        self.ring_fill_samples.store(0, Ordering::Relaxed);
+        self.output_frames.store(0, Ordering::Relaxed);
+        self.output_rate.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Pops one stereo frame from the playthrough ring, or silence while the ring
+/// refills after an underrun.
+///
+/// An empty ring flips `refilling` on: one underrun episode is counted, and the
+/// callback outputs silence until the fill recovers to the target slack. This
+/// turns clock drift (input clock slower than output) into a single bounded gap
+/// that also restores the latency target, instead of a persistent crackle.
+fn pop_playthrough_frame(
+    consumer: &mut Consumer<f32>,
+    refilling: &mut bool,
+    target_fill_samples: usize,
+    status: &AudioStatus,
+) -> (f32, f32) {
+    if *refilling {
+        if consumer.slots() >= target_fill_samples {
+            *refilling = false;
+        } else {
+            return (0.0, 0.0);
+        }
+    }
+    if consumer.slots() < 2 {
+        status.note_underrun();
+        *refilling = true;
+        return (0.0, 0.0);
+    }
+    (
+        consumer.pop().unwrap_or(0.0),
+        consumer.pop().unwrap_or(0.0),
+    )
+}
+
+/// Clock-drift safety net for the opposite direction: input clock faster than
+/// output makes the ring fill — and thus the latency — creep upward without
+/// bound. Once the fill passes 3× the target slack, drop the excess back down
+/// to the target in one bounded skip and count one overflow episode.
+///
+/// Only whole frames are dropped (even sample count) so L/R never swap.
+fn trim_playthrough_excess(
+    consumer: &mut Consumer<f32>,
+    target_fill_samples: usize,
+    status: &AudioStatus,
+) {
+    let fill = consumer.slots();
+    if fill > target_fill_samples.saturating_mul(3) {
+        let excess = (fill - target_fill_samples) & !1;
+        for _ in 0..excess {
+            if consumer.pop().is_err() {
+                break;
+            }
+        }
+        status.note_overflow();
+    }
+}
 
 /// Lock-free handoff of ring-fill measurements from the output callback to the
 /// input callback that owns the resampler.
@@ -611,9 +702,14 @@ impl DriftObservation {
 }
 
 /// Publish a ring-fill measurement after approximately one second of output.
+///
+/// The measurement is normalized so that 0.5 means "fill equals the target
+/// slack": the drift controller in `RtResampler::trim_ratio` steers toward 0.5,
+/// so this keeps the steady-state latency at the user-chosen slack instead of
+/// half the (much larger) ring capacity.
 fn observe_playthrough_fill(
-    consumer: &Option<SharedConsumer>,
-    total_capacity: usize,
+    fill_samples: usize,
+    target_fill_samples: usize,
     frames_processed: usize,
     sample_rate: u32,
     frames_since_observation: &mut usize,
@@ -625,18 +721,11 @@ fn observe_playthrough_fill(
     }
     *frames_since_observation %= sample_rate as usize;
 
-    if total_capacity == 0 {
+    if target_fill_samples == 0 {
         return;
     }
-    if let Some(consumer) = consumer {
-        if let Ok(consumer) = consumer.try_lock() {
-            let filled_slots = consumer.slots();
-            let available_write_slots = total_capacity.saturating_sub(filled_slots);
-            let fill_ratio =
-                (total_capacity - available_write_slots) as f64 / total_capacity as f64;
-            observation.publish(fill_ratio);
-        }
-    }
+    let fill_norm = fill_samples as f64 / (2.0 * target_fill_samples as f64);
+    observation.publish(fill_norm);
 }
 
 /// Publishes one block of processed frames: the mono mix to the analyzer ring,
@@ -655,16 +744,19 @@ fn publish_frames(
     for i in 0..out_l.len().min(out_r.len()) {
         let mix = (out_l[i] + out_r[i]) * 0.5;
         if let Ok(mut ap) = analyzer.try_lock() {
-            if ap.push(mix).is_err() {
-                audio_status.note_overflow();
-            }
+            // A full analyzer ring only drops visualization data — the UI thread
+            // drains it at its own pace — so it does not count as an audio-path
+            // overflow.
+            let _ = ap.push(mix);
         }
         if let Some(ref pp) = playthrough {
             if let Ok(mut p) = pp.try_lock() {
-                if p.push(out_l[i]).is_err() {
-                    audio_status.note_overflow();
-                }
-                if p.push(out_r[i]).is_err() {
+                // Push L/R only as a pair: a half-written frame would swap the
+                // channels of everything that follows.
+                if p.slots() >= 2 {
+                    let _ = p.push(out_l[i]);
+                    let _ = p.push(out_r[i]);
+                } else {
                     audio_status.note_overflow();
                 }
             }
@@ -707,8 +799,7 @@ fn audio_worker(
     cabinet_library: Arc<Mutex<CabinetLibrary>>,
     cabinet_sr: Arc<AtomicU32>,
     cabinet_max_block: Arc<AtomicUsize>,
-    driver_buffer_frames: Arc<AtomicU64>,
-    driver_buffer_rate: Arc<AtomicU64>,
+    latency_stats: Arc<LatencyStats>,
     audio_status: Arc<AudioStatus>,
 ) {
     let mut _input_stream: Option<Stream> = None;
@@ -787,6 +878,11 @@ fn audio_worker(
                 _input_stream = None;
                 _output_stream = None;
 
+                // Fresh telemetry per routing: counters and latency figures must
+                // describe the streams being opened now, not previous sessions.
+                audio_status.reset();
+                latency_stats.reset();
+
                 let (analyzer_producer, analyzer_consumer) = RingBuffer::new(1024 * 64);
                 if let Ok(mut cons_lock) = consumer_mutex.lock() {
                     *cons_lock = Some(analyzer_consumer);
@@ -803,33 +899,77 @@ fn audio_worker(
                 let has_both = input.is_some() && output.is_some();
 
                 let host = cpal::host_from_id(host_id).ok();
-                let input_device = match (&host, input.as_ref()) {
-                    (Some(h), Some(sel)) => {
-                        h.input_devices().ok().and_then(|devs| {
-                            resolve_device(devs, sel.enum_index, &sel.raw_name, |d| {
-                                d.name().ok()
-                            })
-                        })
+                // CROSS-15 runs first: an ASIO driver owns a single duplex
+                // stream pair, so when both directions are routed the lookup
+                // happens once and the resulting `Device` is cloned for both.
+                // Building the two streams on independent `Device`s would tear
+                // each other down — and resolving the directions independently
+                // would also try to hold two loaded drivers at once, which
+                // asio-sys forbids.
+                let resolve_pair = || {
+                    if let Some(shared) = host
+                        .as_ref()
+                        .and_then(|h| asio_duplex_device(h, host_id, &input, &output))
+                    {
+                        return (Some(shared.clone()), Some(shared));
                     }
-                    _ => None,
+                    let input_device = match (&host, input.as_ref()) {
+                        (Some(h), Some(sel)) => resolve_device(
+                            || h.input_devices().ok(),
+                            sel.enum_index,
+                            &sel.raw_name,
+                            |d| d.name().ok(),
+                        ),
+                        _ => None,
+                    };
+                    let output_device = match (&host, output.as_ref()) {
+                        (Some(h), Some(sel)) => resolve_device(
+                            || h.output_devices().ok(),
+                            sel.enum_index,
+                            &sel.raw_name,
+                            |d| d.name().ok(),
+                        ),
+                        _ => None,
+                    };
+                    (input_device, output_device)
                 };
-                let output_device = match (&host, output.as_ref()) {
-                    (Some(h), Some(sel)) => {
-                        h.output_devices().ok().and_then(|devs| {
-                            resolve_device(devs, sel.enum_index, &sel.raw_name, |d| {
-                                d.name().ok()
-                            })
-                        })
+                // A driver released by the routing we just tore down can take a
+                // moment to accept a new client (common with ASIO): retry the
+                // lookup briefly before declaring the device missing. This runs
+                // on the worker thread, never the audio thread.
+                let (mut input_device, mut output_device) = resolve_pair();
+                for _ in 0..2 {
+                    let input_ok = input.is_none() || input_device.is_some();
+                    let output_ok = output.is_none() || output_device.is_some();
+                    if input_ok && output_ok {
+                        break;
                     }
-                    _ => None,
-                };
+                    thread::sleep(Duration::from_millis(150));
+                    (input_device, output_device) = resolve_pair();
+                }
 
                 let negotiated: NegotiatedConfigs = if host.is_none() {
                     Err("Falha ao comunicar com o Host do S.O.".to_string())
                 } else if input.is_some() && input_device.is_none() {
-                    Err("Input Físico não encontrado.".to_string())
+                    Err(format!(
+                        "A entrada \"{}\" está listada mas não pôde ser aberta agora. \
+                         Em ASIO isso costuma significar que outro aplicativo está \
+                         usando o driver (DAW, ASIO Link Pro, painel do fabricante) \
+                         ou que o aparelho foi desconectado. Feche o outro \
+                         aplicativo, reconecte a interface e clique em Atualizar \
+                         Dispositivos.",
+                        input.as_ref().map(|s| s.raw_name.as_str()).unwrap_or("?")
+                    ))
                 } else if output.is_some() && output_device.is_none() {
-                    Err("Output Físico não encontrado.".to_string())
+                    Err(format!(
+                        "A saída \"{}\" está listada mas não pôde ser aberta agora. \
+                         Em ASIO isso costuma significar que outro aplicativo está \
+                         usando o driver (DAW, ASIO Link Pro, painel do fabricante) \
+                         ou que o aparelho foi desconectado. Feche o outro \
+                         aplicativo, reconecte a interface e clique em Atualizar \
+                         Dispositivos.",
+                        output.as_ref().map(|s| s.raw_name.as_str()).unwrap_or("?")
+                    ))
                 } else {
                     match (input_device.as_ref(), output_device.as_ref()) {
                         (Some(in_dev), Some(out_dev)) => match pick_full_duplex(in_dev, out_dev) {
@@ -938,6 +1078,25 @@ fn audio_worker(
                 } else {
                     (None, None)
                 };
+
+                // Slack the ring should hold in steady state — the UI slider's
+                // value, bounded so the 3× overflow watermark still fits inside
+                // the ring. This is the figure the latency display reports and
+                // the drift controller steers toward.
+                let target_fill_samples = (buffer_size as usize * 2)
+                    .clamp(128, (playthrough_capacity / 4).max(128));
+
+                // Prefill with silence up to the target so the startup latency is
+                // deterministic instead of a race between the two callbacks, and
+                // the first output callbacks never see an empty ring.
+                if let Some(p) = &pt_producer {
+                    if let Ok(mut prod) = p.lock() {
+                        for _ in 0..target_fill_samples.min(playthrough_capacity) {
+                            let _ = prod.push(0.0);
+                        }
+                    }
+                }
+
                 let drift_observation = Arc::new(DriftObservation::new());
 
                 let state_clone = standalone_state.clone();
@@ -968,8 +1127,7 @@ fn audio_worker(
                         let state_for_callback = state_clone.clone();
                         let analyzer_for_callback = analyzer_producer.clone();
                         let pt_for_callback = pt_producer.clone();
-                        let frames_for_callback = driver_buffer_frames.clone();
-                        let rate_for_callback = driver_buffer_rate.clone();
+                        let latency_for_callback = latency_stats.clone();
                         let drift_for_callback = drift_observation.clone();
                         let status_for_callback = audio_status.clone();
 
@@ -1046,11 +1204,13 @@ fn audio_worker(
                                 device.build_input_stream(
                                 &strict_config,
                                 move |data: &[f32], _: &_| {
-                                    frames_for_callback.store(
+                                    latency_for_callback.input_frames.store(
                                         (data.len() / channels_usize.max(1)) as u64,
                                         Ordering::Relaxed,
                                     );
-                                    rate_for_callback.store(cfg_rate as u64, Ordering::Relaxed);
+                                    latency_for_callback
+                                        .input_rate
+                                        .store(cfg_rate as u64, Ordering::Relaxed);
                                     let snap = state_for_callback
                                         .try_lock()
                                         .map(|g| g.audio())
@@ -1090,19 +1250,20 @@ fn audio_worker(
                                 let state_for_i32 = state_for_callback.clone();
                                 let analyzer_for_i32 = analyzer_for_callback.clone();
                                 let pt_for_i32 = pt_for_callback.clone();
-                                let frames_for_i32 = frames_for_callback.clone();
-                                let rate_for_i32 = rate_for_callback.clone();
+                                let latency_for_i32 = latency_for_callback.clone();
                                 let drift_for_i32 = drift_for_callback.clone();
                                 let mut last_drift_sequence = 0;
                                 let status_for_i32 = status_for_callback.clone();
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i32], _: &_| {
-                                        frames_for_i32.store(
+                                        latency_for_i32.input_frames.store(
                                             (data.len() / channels_usize.max(1)) as u64,
                                             Ordering::Relaxed,
                                         );
-                                        rate_for_i32.store(cfg_rate as u64, Ordering::Relaxed);
+                                        latency_for_i32
+                                            .input_rate
+                                            .store(cfg_rate as u64, Ordering::Relaxed);
                                         let snap = state_for_i32
                                             .try_lock()
                                             .map(|g| g.audio())
@@ -1142,19 +1303,20 @@ fn audio_worker(
                                 let state_for_i16 = state_for_callback.clone();
                                 let analyzer_for_i16 = analyzer_for_callback.clone();
                                 let pt_for_i16 = pt_for_callback.clone();
-                                let frames_for_i16 = frames_for_callback.clone();
-                                let rate_for_i16 = rate_for_callback.clone();
+                                let latency_for_i16 = latency_for_callback.clone();
                                 let drift_for_i16 = drift_for_callback.clone();
                                 let mut last_drift_sequence = 0;
                                 let status_for_i16 = status_for_callback.clone();
                                 device.build_input_stream(
                                     &strict_config,
                                     move |data: &[i16], _: &_| {
-                                        frames_for_i16.store(
+                                        latency_for_i16.input_frames.store(
                                             (data.len() / channels_usize.max(1)) as u64,
                                             Ordering::Relaxed,
                                         );
-                                        rate_for_i16.store(cfg_rate as u64, Ordering::Relaxed);
+                                        latency_for_i16
+                                            .input_rate
+                                            .store(cfg_rate as u64, Ordering::Relaxed);
                                         let snap = state_for_i16
                                             .try_lock()
                                             .map(|g| g.audio())
@@ -1260,35 +1422,32 @@ fn audio_worker(
                             cpal::SampleFormat::F32 => {
                                 let status_err = audio_status.clone();
                                 let mut frames_since_observation = 0;
+                                let mut refilling = false;
                                 let status_for_callback = audio_status.clone();
+                                let latency_for_out = latency_stats.clone();
                                 device.build_output_stream(
                                 &strict_config,
                                 move |data: &mut [f32], _: &_| {
+                                    let mut ring = pt_for_callback
+                                        .as_ref()
+                                        .and_then(|pc| pc.try_lock().ok());
+                                    if let Some(c) = ring.as_deref_mut() {
+                                        trim_playthrough_excess(
+                                            c,
+                                            target_fill_samples,
+                                            &status_for_callback,
+                                        );
+                                    }
                                     for frame in data.chunks_mut(channels as usize) {
-                                        let (l_sample, r_sample) =
-                                            if let Some(ref pc) = pt_for_callback {
-                                                if let Ok(mut c) = pc.try_lock() {
-                                                    let l = match c.pop() {
-                                                        Ok(v) => v,
-                                                        Err(_) => {
-                                                            status_for_callback.note_underrun();
-                                                            0.0
-                                                        }
-                                                    };
-                                                    let r = match c.pop() {
-                                                        Ok(v) => v,
-                                                        Err(_) => {
-                                                            status_for_callback.note_underrun();
-                                                            0.0
-                                                        }
-                                                    };
-                                                    (l, r)
-                                                } else {
-                                                    (0.0, 0.0)
-                                                }
-                                            } else {
-                                                (0.0, 0.0)
-                                            };
+                                        let (l_sample, r_sample) = match ring.as_deref_mut() {
+                                            Some(c) => pop_playthrough_frame(
+                                                c,
+                                                &mut refilling,
+                                                target_fill_samples,
+                                                &status_for_callback,
+                                            ),
+                                            None => (0.0, 0.0),
+                                        };
                                         if let Some(l) = frame.get_mut(l_idx) {
                                             *l = l_sample;
                                         }
@@ -1296,10 +1455,23 @@ fn audio_worker(
                                             *r = r_sample;
                                         }
                                     }
+                                    let frames = data.len() / channels as usize;
+                                    let fill =
+                                        ring.as_deref().map(|c| c.slots()).unwrap_or(0);
+                                    drop(ring);
+                                    latency_for_out
+                                        .output_frames
+                                        .store(frames as u64, Ordering::Relaxed);
+                                    latency_for_out
+                                        .output_rate
+                                        .store(output_rate as u64, Ordering::Relaxed);
+                                    latency_for_out
+                                        .ring_fill_samples
+                                        .store(fill as u64, Ordering::Relaxed);
                                     observe_playthrough_fill(
-                                        &pt_for_callback,
-                                        playthrough_capacity,
-                                        data.len() / channels as usize,
+                                        fill,
+                                        target_fill_samples,
+                                        frames,
                                         output_rate,
                                         &mut frames_since_observation,
                                         &drift_for_callback,
@@ -1309,52 +1481,127 @@ fn audio_worker(
                                 None,
                             )
                             }
+                            cpal::SampleFormat::I32 => {
+                                let status_err = audio_status.clone();
+                                let status_for_i32 = audio_status.clone();
+                                let pt_for_i32 = pt_for_callback.clone();
+                                let drift_for_i32 = drift_for_callback.clone();
+                                let mut frames_since_observation = 0;
+                                let mut refilling = false;
+                                let latency_for_i32 = latency_stats.clone();
+                                device.build_output_stream(
+                                    &strict_config,
+                                    move |data: &mut [i32], _: &_| {
+                                        let mut ring = pt_for_i32
+                                            .as_ref()
+                                            .and_then(|pc| pc.try_lock().ok());
+                                        if let Some(c) = ring.as_deref_mut() {
+                                            trim_playthrough_excess(
+                                                c,
+                                                target_fill_samples,
+                                                &status_for_i32,
+                                            );
+                                        }
+                                        for frame in data.chunks_mut(channels as usize) {
+                                            let (l_sample, r_sample) = match ring.as_deref_mut()
+                                            {
+                                                Some(c) => pop_playthrough_frame(
+                                                    c,
+                                                    &mut refilling,
+                                                    target_fill_samples,
+                                                    &status_for_i32,
+                                                ),
+                                                None => (0.0, 0.0),
+                                            };
+                                            if let Some(l) = frame.get_mut(l_idx) {
+                                                *l = sample_convert::f32_to_i32(l_sample);
+                                            }
+                                            if let Some(r) = frame.get_mut(r_idx) {
+                                                *r = sample_convert::f32_to_i32(r_sample);
+                                            }
+                                        }
+                                        let frames = data.len() / channels as usize;
+                                        let fill =
+                                            ring.as_deref().map(|c| c.slots()).unwrap_or(0);
+                                        drop(ring);
+                                        latency_for_i32
+                                            .output_frames
+                                            .store(frames as u64, Ordering::Relaxed);
+                                        latency_for_i32
+                                            .output_rate
+                                            .store(output_rate as u64, Ordering::Relaxed);
+                                        latency_for_i32
+                                            .ring_fill_samples
+                                            .store(fill as u64, Ordering::Relaxed);
+                                        observe_playthrough_fill(
+                                            fill,
+                                            target_fill_samples,
+                                            frames,
+                                            output_rate,
+                                            &mut frames_since_observation,
+                                            &drift_for_i32,
+                                        );
+                                    },
+                                    move |err| status_err.set_error(stream_error_kind(err)),
+                                    None,
+                                )
+                            }
                             cpal::SampleFormat::I16 => {
                                 let status_err = audio_status.clone();
                                 let status_for_i16 = audio_status.clone();
                                 let pt_for_i16 = pt_for_callback.clone();
                                 let drift_for_i16 = drift_for_callback.clone();
                                 let mut frames_since_observation = 0;
+                                let mut refilling = false;
+                                let latency_for_i16 = latency_stats.clone();
                                 device.build_output_stream(
                                     &strict_config,
                                     move |data: &mut [i16], _: &_| {
+                                        let mut ring = pt_for_i16
+                                            .as_ref()
+                                            .and_then(|pc| pc.try_lock().ok());
+                                        if let Some(c) = ring.as_deref_mut() {
+                                            trim_playthrough_excess(
+                                                c,
+                                                target_fill_samples,
+                                                &status_for_i16,
+                                            );
+                                        }
                                         for frame in data.chunks_mut(channels as usize) {
-                                            let (l_sample, r_sample) = if let Some(ref pc) =
-                                                pt_for_i16
+                                            let (l_sample, r_sample) = match ring.as_deref_mut()
                                             {
-                                                if let Ok(mut c) = pc.try_lock() {
-                                                    let l = match c.pop() {
-                                                        Ok(v) => v,
-                                                        Err(_) => {
-                                                            status_for_i16.note_underrun();
-                                                            0.0
-                                                        }
-                                                    };
-                                                    let r = match c.pop() {
-                                                        Ok(v) => v,
-                                                        Err(_) => {
-                                                            status_for_i16.note_underrun();
-                                                            0.0
-                                                        }
-                                                    };
-                                                    (l, r)
-                                                } else {
-                                                    (0.0, 0.0)
-                                                }
-                                            } else {
-                                                (0.0, 0.0)
+                                                Some(c) => pop_playthrough_frame(
+                                                    c,
+                                                    &mut refilling,
+                                                    target_fill_samples,
+                                                    &status_for_i16,
+                                                ),
+                                                None => (0.0, 0.0),
                                             };
                                             if let Some(l) = frame.get_mut(l_idx) {
-                                                *l = (l_sample * i16::MAX as f32) as i16;
+                                                *l = sample_convert::f32_to_i16(l_sample);
                                             }
                                             if let Some(r) = frame.get_mut(r_idx) {
-                                                *r = (r_sample * i16::MAX as f32) as i16;
+                                                *r = sample_convert::f32_to_i16(r_sample);
                                             }
                                         }
+                                        let frames = data.len() / channels as usize;
+                                        let fill =
+                                            ring.as_deref().map(|c| c.slots()).unwrap_or(0);
+                                        drop(ring);
+                                        latency_for_i16
+                                            .output_frames
+                                            .store(frames as u64, Ordering::Relaxed);
+                                        latency_for_i16
+                                            .output_rate
+                                            .store(output_rate as u64, Ordering::Relaxed);
+                                        latency_for_i16
+                                            .ring_fill_samples
+                                            .store(fill as u64, Ordering::Relaxed);
                                         observe_playthrough_fill(
-                                            &pt_for_i16,
-                                            playthrough_capacity,
-                                            data.len() / channels as usize,
+                                            fill,
+                                            target_fill_samples,
+                                            frames,
                                             output_rate,
                                             &mut frames_since_observation,
                                             &drift_for_i16,
@@ -1470,8 +1717,7 @@ impl StandaloneApp {
 
         let standalone_state = Arc::new(Mutex::new(initial_state));
 
-        let driver_buffer_frames = Arc::new(AtomicU64::new(0));
-        let driver_buffer_rate = Arc::new(AtomicU64::new(0));
+        let latency_stats = Arc::new(LatencyStats::new());
         let audio_status = Arc::new(AudioStatus::new());
 
         let cons_clone = cons_arc.clone();
@@ -1480,8 +1726,7 @@ impl StandaloneApp {
         let library_clone = cabinet_library.clone();
         let sr_clone = cabinet_sr.clone();
         let maxb_clone = cabinet_max_block.clone();
-        let frames_clone = driver_buffer_frames.clone();
-        let rate_clone = driver_buffer_rate.clone();
+        let latency_clone = latency_stats.clone();
         let status_clone = audio_status.clone();
         thread::spawn(move || {
             audio_worker(
@@ -1493,8 +1738,7 @@ impl StandaloneApp {
                 library_clone,
                 sr_clone,
                 maxb_clone,
-                frames_clone,
-                rate_clone,
+                latency_clone,
                 status_clone,
             );
         });
@@ -1519,14 +1763,16 @@ impl StandaloneApp {
             buffer_range_min: 5,  // 32 minimum starting
             buffer_range_max: 13, // 8192 max starting
 
-            driver_buffer_frames,
-            driver_buffer_rate,
+            latency_stats,
 
             sample_rate_warning: None,
             audio_status,
             last_audio_error: None,
             last_audio_error_details: None,
             show_error_popup: false,
+
+            prev_glitch_total: 0,
+            recent_glitches: VecDeque::new(),
 
             input_is_mono: true,
             output_is_mono: false,
@@ -1581,8 +1827,14 @@ impl StandaloneApp {
                     self.sample_rate_warning = sample_rate_warning;
                     if let Err(msg) = result {
                         eprintln!("[Audio Engine] ERRO Crítico do CPAL: {}", msg);
-                        self.last_audio_error =
-                            Some("⚠️ Limitação de Hardware: Buffer negado".to_string());
+                        // A device that vanished from the enumeration is not a
+                        // buffer problem — label it so the guidance fits.
+                        let title = if msg.contains("não pôde ser aberta") {
+                            "⚠️ Dispositivo indisponível"
+                        } else {
+                            "⚠️ Limitação de Hardware: Buffer negado"
+                        };
+                        self.last_audio_error = Some(title.to_string());
                         self.last_audio_error_details = Some(msg);
                     } else {
                         self.last_audio_error = None;
@@ -1691,6 +1943,38 @@ impl eframe::App for StandaloneApp {
         }
         // Reset the coalesced-error tally each frame so it never grows unbounded.
         let _ = self.audio_status.take_dropped_errors();
+
+        // Track glitch episodes (underrun/overflow resyncs) in a rolling 60 s
+        // window. Counters only ever grow between routings; a drop means the
+        // worker reset them for a new routing, so the history restarts too.
+        let glitch_total = self.audio_status.underruns() + self.audio_status.overflows();
+        if glitch_total > self.prev_glitch_total {
+            self.recent_glitches.push_back(Instant::now());
+        } else if glitch_total < self.prev_glitch_total {
+            self.recent_glitches.clear();
+        }
+        self.prev_glitch_total = glitch_total;
+        while self
+            .recent_glitches
+            .front()
+            .is_some_and(|t| t.elapsed() > Duration::from_secs(60))
+        {
+            self.recent_glitches.pop_front();
+        }
+        // Repeated resyncs mean the input and output clocks drift faster than
+        // the ring slack absorbs — surface it once via the existing error banner.
+        if self.recent_glitches.len() >= 3 && self.last_audio_error.is_none() {
+            self.last_audio_error =
+                Some("⚠️ Deriva de clock entre entrada e saída".to_string());
+            self.last_audio_error_details = Some(
+                "O ring de playthrough precisou ressincronizar 3+ vezes no último \
+                 minuto — os clocks dos dispositivos de entrada e saída estão \
+                 derivando. O sistema se recupera sozinho (com estalos breves). \
+                 Para eliminar: aumente a folga do ring, use o mesmo dispositivo \
+                 físico para entrada e saída, ou use um driver ASIO."
+                    .to_string(),
+            );
+        }
 
         if let Ok(mut cons_lock) = self.consumer.try_lock() {
             if let Some(cons) = cons_lock.as_mut() {
@@ -1813,16 +2097,49 @@ impl eframe::App for StandaloneApp {
                             }
                         });
 
+                        // Health verdict for the current routing: counters are
+                        // zeroed by the worker on every Apply, so zero here
+                        // really means "clean since the streams opened".
                         let underruns = self.audio_status.underruns();
                         let overflows = self.audio_status.overflows();
-                        if underruns != 0 || overflows != 0 {
+                        let streams_live =
+                            self.latency_stats.input_rate.load(Ordering::Relaxed) > 0
+                                || self.latency_stats.output_rate.load(Ordering::Relaxed) > 0;
+                        if streams_live {
                             ui.separator();
                             ui.heading("📊 Telemetria de Áudio");
-                            if underruns != 0 {
-                                ui.label(format!("Underruns: {underruns}"));
-                            }
-                            if overflows != 0 {
-                                ui.label(format!("Overflows: {overflows}"));
+                            if underruns == 0 && overflows == 0 {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "✅ Estável — sem underruns/overflows neste routing",
+                                    )
+                                    .color(egui::Color32::from_rgb(80, 200, 120)),
+                                );
+                            } else {
+                                if underruns != 0 {
+                                    ui.label(format!(
+                                        "Underruns (ring esvaziou): {underruns}"
+                                    ));
+                                }
+                                if overflows != 0 {
+                                    ui.label(format!(
+                                        "Overflows (excesso descartado): {overflows}"
+                                    ));
+                                }
+                                if let Some(last) = self.recent_glitches.back() {
+                                    ui.label(format!(
+                                        "Última ocorrência há {:.0} s",
+                                        last.elapsed().as_secs_f32()
+                                    ));
+                                }
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Recuperação automática ativa: o ring ressincroniza \
+                                         sozinho na folga alvo.",
+                                    )
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                                );
                             }
                         }
 
@@ -1973,13 +2290,46 @@ impl eframe::App for StandaloneApp {
                         ui.heading("⏱️ Ring buffer slack");
                         ui.add_space(2.0);
 
-                        // Real latency comes from the block the driver actually
-                        // hands us, not from the slider above.
-                        let frames = self.driver_buffer_frames.load(Ordering::Relaxed) as usize;
-                        let rate = self.driver_buffer_rate.load(Ordering::Relaxed) as u32;
-                        if frames > 0 && rate > 0 {
-                            ui.label(format_latency(frames, rate));
-                            ui.add_space(2.0);
+                        // End-to-end latency composed from what each callback
+                        // actually observed: input block + playthrough ring fill
+                        // + output block. Partial figures (input-only or
+                        // output-only routing) show whichever stages exist.
+                        {
+                            let in_frames =
+                                self.latency_stats.input_frames.load(Ordering::Relaxed);
+                            let in_rate = self.latency_stats.input_rate.load(Ordering::Relaxed);
+                            let fill =
+                                self.latency_stats.ring_fill_samples.load(Ordering::Relaxed);
+                            let out_frames =
+                                self.latency_stats.output_frames.load(Ordering::Relaxed);
+                            let out_rate =
+                                self.latency_stats.output_rate.load(Ordering::Relaxed);
+
+                            let in_ms = if in_rate > 0 {
+                                in_frames as f64 * 1000.0 / in_rate as f64
+                            } else {
+                                0.0
+                            };
+                            let (ring_ms, out_ms) = if out_rate > 0 {
+                                (
+                                    (fill / 2) as f64 * 1000.0 / out_rate as f64,
+                                    out_frames as f64 * 1000.0 / out_rate as f64,
+                                )
+                            } else {
+                                (0.0, 0.0)
+                            };
+                            let total_ms = in_ms + ring_ms + out_ms;
+                            if total_ms > 0.0 {
+                                ui.label(format!("Latência total ≈ {total_ms:.1} ms"));
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "entrada {in_ms:.1} + ring {ring_ms:.1} + saída {out_ms:.1} ms"
+                                    ))
+                                    .small()
+                                    .color(egui::Color32::GRAY),
+                                );
+                                ui.add_space(2.0);
+                            }
                         }
 
                         let mut slider_changed = false;
@@ -2007,9 +2357,9 @@ impl eframe::App for StandaloneApp {
 
                         let buf_size = 1 << self.buffer_power;
                         let caption = match buf_size {
-                            0..=128 => "Folga mínima no ring de playthrough.\n⚠️ Risco EXTREMO de estalos/breaks.",
-                            129..=512 => "Folga equilibrada.\n✅ Recomendado para a maioria dos drivers.",
-                            _ => "Folga ampla.\n🔥 Estabilidade máxima. Mais uso de memória.",
+                            0..=128 => "Folga alvo mínima no ring de playthrough.\n⚠️ Risco EXTREMO de estalos/breaks.",
+                            129..=512 => "Folga alvo equilibrada (menor latência de ring).\n✅ Recomendado para a maioria dos drivers.",
+                            _ => "Folga alvo ampla (mais latência de ring).\n🔥 Estabilidade máxima contra drift e jitter.",
                         };
 
                         ui.add_space(5.0);
@@ -2049,14 +2399,21 @@ impl eframe::App for StandaloneApp {
 
         if self.show_error_popup {
             let mut open = self.show_error_popup;
-            egui::Window::new("ℹ️ Sobre a Limitação do Buffer")
+            egui::Window::new("ℹ️ Detalhes do erro de áudio")
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
                     if let Some(details) = &self.last_audio_error_details {
-                        ui.label("Algumas placas de som ou drivers recusam trabalhar em latências tão precisas. O aplicativo exige esse número e eles respondem: Ocupado/Inválido.\n");
-                        ui.label("👉 Arraste o buffer para a direita até esse erro sumir. Se a barra chegou no limite, clique em 'Preciso de mais estabilidade'.\n\nErro exato das engrenagens do S.O:");
+                        let device_missing = self.last_audio_error.as_deref()
+                            == Some("⚠️ Dispositivo indisponível");
+                        if device_missing {
+                            ui.label("O dispositivo selecionado sumiu da enumeração ou o driver recusou abrir. Com ASIO isso geralmente significa que outro aplicativo está usando o driver (DAW, ASIO Link Pro, painel do fabricante) — drivers ASIO aceitam um cliente por vez.\n");
+                            ui.label("👉 Feche outros aplicativos de áudio, reconecte a interface e clique em 'Atualizar Dispositivos'.\n\nErro exato das engrenagens do S.O:");
+                        } else {
+                            ui.label("Algumas placas de som ou drivers recusam trabalhar em latências tão precisas. O aplicativo exige esse número e eles respondem: Ocupado/Inválido.\n");
+                            ui.label("👉 Arraste o buffer para a direita até esse erro sumir. Se a barra chegou no limite, clique em 'Preciso de mais estabilidade'.\n\nErro exato das engrenagens do S.O:");
+                        }
 
                         egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
                             ui.add(

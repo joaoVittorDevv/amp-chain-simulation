@@ -216,6 +216,15 @@ fn process_standalone_amp(
             let ts_model = snap.mlc_ts_model.as_f32();
             let tube_model = snap.mlc_tube_model.as_f32();
             let adaa_order = snap.mlc_adaa_order.as_f32();
+            // One MLC instance costs roughly two thirds of the real-time
+            // budget on a typical machine, so running both channels always
+            // overruns the callback and the output degrades into clicks. With
+            // a mono source (the standalone's "Entrada Mono" default) the two
+            // buffers are bit-identical all the way to this stage — the same
+            // deterministic per-channel processors saw the same input — so
+            // the right channel can be a copy instead of a second full pass.
+            // True stereo exits the comparison at the first differing sample.
+            let mono_input = buf_l[..] == buf_r[..];
             if let Some(mlc) = mlc_l {
                 mlc.set_gain(snap.mlc_gain);
                 mlc.set_master(snap.mlc_master);
@@ -261,7 +270,13 @@ fn process_standalone_amp(
                 mlc.set_adaa_order(adaa_order);
                 mlc.process_block(buf_l.as_mut_ptr(), buf_l.len());
             }
-            if let Some(mlc) = mlc_r {
+            if mono_input {
+                // The right instance idles while the source is mono; its state
+                // goes stale, so the first stereo block after a switch carries
+                // one small transient — accepted in exchange for halving the
+                // steady-state cost.
+                buf_r.copy_from_slice(buf_l);
+            } else if let Some(mlc) = mlc_r {
                 mlc.set_gain(snap.mlc_gain);
                 mlc.set_master(snap.mlc_master);
                 mlc.set_bass(snap.mlc_bass);
